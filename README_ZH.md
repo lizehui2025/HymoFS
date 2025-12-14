@@ -37,18 +37,21 @@ HymoFS 是一个内核级的路径操控和隐藏框架，专为 Android 上的�
     *   **访问**: 通过 `open`、`access` 等方式访问时，返回 `-ENOENT` (No such file or directory)。
     *   **列表**: 在 `readdir` 操作期间过滤掉该条目，使其对 `ls` 不可见。
 
-#### 4. Inject (目录注入)
-在目录列表中启用“幽灵”文件。
-*   **IOCTL**: `HYMO_IOC_INJECT_RULE`
-*   **参数**: `struct hymo_ioctl_arg`
-    *   `src`: 目标目录路径
+#### 4. Auto-Injection (自动注入 - 内部机制)
+当为不存在的文件添加重定向规则时，自动在目录列表中启用“幽灵”文件。
 *   **机制**:
     *   **触发**: 当调用 `add` 时，如果源路径不存在，HymoFS 会自动识别父目录并将其添加到内部注入列表中。
     *   **列表**: Hook 了 `getdents/getdents64`。在真实的目录条目列出之后，HymoFS 会人为地追加那些位于该目录下且由 `add` 规则定义的条目。
     *   **Mtime 伪装**: Hook 了 `fs/stat.c` 中的 `vfs_getattr`。强制将目录的修改时间 (`mtime`) 和改变时间 (`ctime`) 报告为当前系统时间。
 
 #### 5. Delete (删除)
-根据键路径删除特定的规则。
+根据键路径删除特定的规则（重定向或隐藏）。
+
+*   **效果**: 在所有哈希表（`hymo_paths`、`hymo_hide_paths`、`hymo_inject_dirs`）中搜索给定的键，如果找到则删除该条目。
+*   **键路径**:
+    *   对于 **Add (重定向)** 规则: 使用 *源* 路径 (例如 `/system/app/YouTube`)。
+    *   对于 **Hide (隐藏)** 规则: 使用 *目标* 路径 (例如 `/system/app/Bloatware`)。
+    *   **注意**: 注入规则由系统自动管理，当相应的重定向规则被删除时会自动清理。
 *   **IOCTL**: `HYMO_IOC_DEL_RULE`
 *   **参数**: `struct hymo_ioctl_arg`
     *   `src`: 规则的键路径

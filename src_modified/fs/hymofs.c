@@ -92,6 +92,35 @@ static void hymo_cleanup(void) {
     }
 }
 
+static void hymofs_add_inject_rule(char *dir)
+{
+    struct hymo_inject_entry *inject_entry;
+    u32 hash;
+    bool found = false;
+
+    if (!dir) return;
+
+    hash = full_name_hash(NULL, dir, strlen(dir));
+    hash_for_each_possible(hymo_inject_dirs, inject_entry, node, hash) {
+        if (strcmp(inject_entry->dir, dir) == 0) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        inject_entry = kmalloc(sizeof(*inject_entry), GFP_ATOMIC);
+        if (inject_entry) {
+            inject_entry->dir = dir; // Transfer ownership
+            hash_add(hymo_inject_dirs, &inject_entry->node, hash);
+            hymo_log("auto-inject parent: %s\n", dir);
+        } else {
+            kfree(dir);
+        }
+    } else {
+        kfree(dir);
+    }
+}
+
 static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
     struct hymo_ioctl_arg req;
     struct hymo_entry *entry;
@@ -138,8 +167,83 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
     }
 
     switch (cmd) {
-        case HYMO_IOC_ADD_RULE:
-            if (!src || !target) { ret = -EINVAL; break; }
+        case HYMO_IOC_ADD_RULE: {
+            char *parent_dir = NULL;
+            char *resolved_src = NULL;
+            struct path path;
+            char *tmp_buf = kmalloc(PATH_MAX, GFP_KERNEL);
+            
+            if (!src || !target) { 
+                kfree(tmp_buf);
+                ret = -EINVAL; 
+                break; 
+            }
+            if (!tmp_buf) { ret = -ENOMEM; break; }
+
+            hymo_log("add rule: src=%s, target=%s, type=%d\n", src, target, req.type);
+            
+            // 1. Try to resolve full path (if file exists)
+            if (kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
+                char *res = d_path(&path, tmp_buf, PATH_MAX);
+                if (!IS_ERR(res)) {
+                    resolved_src = kstrdup(res, GFP_KERNEL);
+                    
+                    /* Always extract parent directory for injection, even if file exists */
+                    {
+                        char *last_slash = strrchr(res, '/');
+                        if (last_slash) {
+                            if (last_slash == res) {
+                                parent_dir = kstrdup("/", GFP_KERNEL);
+                            } else {
+                                size_t len = last_slash - res;
+                                parent_dir = kmalloc(len + 1, GFP_KERNEL);
+                                if (parent_dir) {
+                                    memcpy(parent_dir, res, len);
+                                    parent_dir[len] = '\0';
+                                }
+                            }
+                        }
+                    }
+                }
+                path_put(&path);
+            } else {
+                // 2. Path does not exist, try to resolve parent
+                char *last_slash = strrchr(src, '/');
+                if (last_slash && last_slash != src) {
+                    size_t len = last_slash - src;
+                    char *p_str = kmalloc(len + 1, GFP_KERNEL);
+                    if (p_str) {
+                        memcpy(p_str, src, len);
+                        p_str[len] = '\0';
+                        
+                        if (kern_path(p_str, LOOKUP_FOLLOW, &path) == 0) {
+                            char *res = d_path(&path, tmp_buf, PATH_MAX);
+                            if (!IS_ERR(res)) {
+                                // Reconstruct src = parent_resolved + / + filename
+                                size_t res_len = strlen(res);
+                                size_t name_len = strlen(last_slash);
+                                resolved_src = kmalloc(res_len + name_len + 1, GFP_KERNEL);
+                                if (resolved_src) {
+                                    strcpy(resolved_src, res);
+                                    strcat(resolved_src, last_slash);
+                                }
+                                // We need to inject this parent
+                                parent_dir = kstrdup(res, GFP_KERNEL);
+                            }
+                            path_put(&path);
+                        }
+                        kfree(p_str);
+                    }
+                }
+            }
+            
+            kfree(tmp_buf);
+
+            if (resolved_src) {
+                kfree(src);
+                src = resolved_src;
+            }
+
             hash = full_name_hash(NULL, src, strlen(src));
             spin_lock_irqsave(&hymo_lock, flags);
             hash_for_each_possible(hymo_paths, entry, node, hash) {
@@ -166,12 +270,45 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
                     }
                 }
             }
+
+            // Add inject rule if needed
+            if (parent_dir) {
+                hymofs_add_inject_rule(parent_dir);
+            }
+
             atomic_inc(&hymo_version);
             spin_unlock_irqrestore(&hymo_lock, flags);
             break;
+        }
 
-        case HYMO_IOC_HIDE_RULE:
-            if (!src) { ret = -EINVAL; break; }
+        case HYMO_IOC_HIDE_RULE: {
+            char *resolved_src = NULL;
+            struct path path;
+            char *tmp_buf = kmalloc(PATH_MAX, GFP_KERNEL);
+
+            if (!src) { 
+                kfree(tmp_buf);
+                ret = -EINVAL; 
+                break; 
+            }
+            if (!tmp_buf) { ret = -ENOMEM; break; }
+
+            hymo_log("hide rule: src=%s\n", src);
+
+            if (kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
+                char *res = d_path(&path, tmp_buf, PATH_MAX);
+                if (!IS_ERR(res)) {
+                    resolved_src = kstrdup(res, GFP_KERNEL);
+                }
+                path_put(&path);
+            }
+            kfree(tmp_buf);
+
+            if (resolved_src) {
+                kfree(src);
+                src = resolved_src;
+            }
+
             hash = full_name_hash(NULL, src, strlen(src));
             spin_lock_irqsave(&hymo_lock, flags);
             hash_for_each_possible(hymo_hide_paths, hide_entry, node, hash) {
@@ -193,30 +330,7 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
             atomic_inc(&hymo_version);
             spin_unlock_irqrestore(&hymo_lock, flags);
             break;
-
-        case HYMO_IOC_INJECT_RULE:
-            if (!src) { ret = -EINVAL; break; }
-            hash = full_name_hash(NULL, src, strlen(src));
-            spin_lock_irqsave(&hymo_lock, flags);
-            hash_for_each_possible(hymo_inject_dirs, inject_entry, node, hash) {
-                if (strcmp(inject_entry->dir, src) == 0) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                inject_entry = kmalloc(sizeof(*inject_entry), GFP_ATOMIC);
-                if (inject_entry) {
-                    inject_entry->dir = kstrdup(src, GFP_ATOMIC);
-                    if (inject_entry->dir)
-                        hash_add(hymo_inject_dirs, &inject_entry->node, hash);
-                    else
-                        kfree(inject_entry);
-                }
-            }
-            atomic_inc(&hymo_version);
-            spin_unlock_irqrestore(&hymo_lock, flags);
-            break;
+        }
 
         case HYMO_IOC_DEL_RULE:
             if (!src) { ret = -EINVAL; break; }
