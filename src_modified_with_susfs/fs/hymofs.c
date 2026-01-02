@@ -362,7 +362,6 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg) {
     struct hymo_inject_entry *inject_entry;
     char *src = NULL, *target = NULL;
     u32 hash;
-    unsigned long flags;
     bool found = false;
     int ret = 0;
 
@@ -1591,7 +1590,7 @@ static __always_inline bool bloom_test(const unsigned long *filter, const char *
 {
     u32 h1 = full_name_hash(NULL, name, namlen);
     /* Use bitwise AND to avoid branch */
-    return test_bit(h1 & HYMO_BLOOM_MASK, filter) & 
+    return test_bit(h1 & HYMO_BLOOM_MASK, filter) && 
            test_bit((h1 >> 16) & HYMO_BLOOM_MASK, filter);
 }
 
@@ -2069,7 +2068,6 @@ bool hymofs_is_overlay_xattr(struct dentry *dentry, const char *name)
 {
     struct hymo_xattr_sb_entry *sb_entry;
     bool found = false;
-    unsigned long flags;
 
     if (!name) return false;
     if (strncmp(name, "trusted.overlay.", 16) != 0) return false;
