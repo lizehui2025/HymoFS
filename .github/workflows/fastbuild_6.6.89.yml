@@ -122,8 +122,17 @@ jobs:
           cd kernel_workspace
           DEFCONFIG=./common/arch/arm64/configs/gki_defconfig
           
-          # HymoFS 配置
+          # HymoFS 配置 (全功能测试)
           echo "CONFIG_HYMOFS=y" >> "$DEFCONFIG"
+          echo "CONFIG_HYMOFS_REVERSE_LOOKUP=y" >> "$DEFCONFIG"
+          echo "CONFIG_HYMOFS_FORWARD_REDIRECT=y" >> "$DEFCONFIG"
+          echo "CONFIG_HYMOFS_HIDE_ENTRIES=y" >> "$DEFCONFIG"
+          echo "CONFIG_HYMOFS_INJECT_ENTRIES=y" >> "$DEFCONFIG"
+          echo "CONFIG_HYMOFS_STAT_SPOOF=y" >> "$DEFCONFIG"
+          echo "CONFIG_HYMOFS_XATTR_FILTER=y" >> "$DEFCONFIG"
+          echo "CONFIG_HYMOFS_UNAME_SPOOF=y" >> "$DEFCONFIG"
+          echo "CONFIG_HYMOFS_CMDLINE_SPOOF=y" >> "$DEFCONFIG"
+          echo "CONFIG_HYMOFS_DEBUG=y" >> "$DEFCONFIG"
           
           # Mountify 支持
           echo "CONFIG_TMPFS_XATTR=y" >> "$DEFCONFIG"
