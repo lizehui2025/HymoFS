@@ -14,5 +14,5 @@ Load:
 ## License
 
 - **Author's work** — Apache License 2.0 (Apache-2.0). When used as a kernel module, **GPL-2.0** applies for kernel compatibility.
-- [LICENSE](LICENSE), [LICENSE-GPL-2.0](LICENSE-GPL-2.0), [LICENSE-Apache-2.0](LICENSE-Apache-2.0), [NOTICE](NOTICE)
+- [LICENSE](LICENSE), [LICENSE-GPL-2.0](LICENSE-GPL-2.0), [NOTICE](NOTICE)
 - SPDX-License-Identifier: Apache-2.0 OR GPL-2.0
