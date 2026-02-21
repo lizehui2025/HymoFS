@@ -2100,6 +2100,15 @@ passthrough:
 #define HYMO_POP_STACK(regs)	do { } while (0)
 #endif
 
+/* Path register pointer for syscall tracepoint (avoids u64* vs unsigned long* across archs) */
+#if defined(__aarch64__) || defined(__x86_64__)
+#define HYMO_PATH_REG_PTR(regs, id)  ((u64 *)((id) == __NR_execve ? &HYMO_REG0(regs) : &HYMO_REG1(regs)))
+#define HYMO_PATH_REG_VAL(p)         ((u64)(uintptr_t)(p))
+#else
+#define HYMO_PATH_REG_PTR(regs, id)  ((unsigned long *)((id) == __NR_execve ? &HYMO_REG0(regs) : &HYMO_REG1(regs)))
+#define HYMO_PATH_REG_VAL(p)         ((unsigned long)(uintptr_t)(p))
+#endif
+
 /*
  * vfs_getattr / vfs_getxattr argument positions across kernel versions.
  * <5.12:  vfs_getattr(path, kstat, mask, flags)
@@ -2229,7 +2238,6 @@ void hymofs_handle_sys_enter_path(struct pt_regs *regs, long id)
 	char *buf;
 	char *target;
 	char __user *new_path;
-	unsigned long *path_reg;
 
 	if (!hymo_tp_check_path_syscall(id))
 		return;
@@ -2238,8 +2246,7 @@ void hymofs_handle_sys_enter_path(struct pt_regs *regs, long id)
 	if (atomic_long_read(&hymo_xattr_source_tgid) == (long)task_tgid_vnr(current))
 		return;
 
-	path_reg = (id == __NR_execve) ? &HYMO_REG0(regs) : &HYMO_REG1(regs);
-	filename_user = (const char __user *)(uintptr_t)*path_reg;
+	filename_user = (const char __user *)(uintptr_t)*HYMO_PATH_REG_PTR(regs, id);
 	if (!filename_user)
 		return;
 
@@ -2263,7 +2270,7 @@ void hymofs_handle_sys_enter_path(struct pt_regs *regs, long id)
 	if (unlikely(hymofs_should_hide(buf))) {
 		new_path = hymo_userspace_stack_buffer(HYMO_HIDE_PATH, sizeof(HYMO_HIDE_PATH));
 		if (new_path)
-			*path_reg = (unsigned long)(uintptr_t)new_path;
+			*HYMO_PATH_REG_PTR(regs, id) = HYMO_PATH_REG_VAL(new_path);
 		return;
 	}
 
@@ -2281,7 +2288,7 @@ void hymofs_handle_sys_enter_path(struct pt_regs *regs, long id)
 		new_path = hymo_userspace_stack_buffer(target, tlen);
 		kfree(target);
 		if (new_path)
-			*path_reg = (unsigned long)(uintptr_t)new_path;
+			*HYMO_PATH_REG_PTR(regs, id) = HYMO_PATH_REG_VAL(new_path);
 	}
 }
 
