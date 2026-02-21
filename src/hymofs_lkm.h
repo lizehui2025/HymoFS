@@ -215,6 +215,16 @@ struct hymofs_filldir_wrapper {
 	struct dentry *merge_target_dentries[HYMO_MAX_MERGE_TARGETS];
 };
 
+/* kretprobe instance data for iterate_dir (ftrace slot / kprobe mode) */
+struct hymo_iterate_ri_data {
+	int did_swap;
+	struct hymofs_filldir_wrapper *wrapper;
+};
+
+/* Per-CPU state for iterate_dir; defined in hymofs_core.c, used by hymofs_ftrace.c */
+DECLARE_PER_CPU(struct hymofs_filldir_wrapper, hymo_iterate_wrapper);
+DECLARE_PER_CPU(int, hymo_iterate_did_swap);
+
 /* ======================================================================
  * Logging
  * ====================================================================== */

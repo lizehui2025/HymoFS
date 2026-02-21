@@ -5,9 +5,9 @@
  * License: Author's work under Apache-2.0; when used as a kernel module
  * (or linked with the Linux kernel), GPL-2.0 applies for kernel compatibility.
  *
- * All hooks use kprobes (no ftrace, no sys_call_table patch).
- * GET_FD: kprobe+kretprobe on ni_syscall. VFS: kprobe pre_handlers on
- *   getname_flags, vfs_getattr, d_path, iterate_dir.
+ * All hooks use kprobes or ftrace (fallback to kprobe).
+ * GET_FD: kprobe+kretprobe on ni_syscall. VFS: try ftrace (entry) + kretprobe
+ *   (exit) for vfs_getattr, d_path, iterate_dir, vfs_getxattr; else kprobe.
  * Works on CONFIG_STRICT_KERNEL_RWX kernels. Syscall nr passed at insmod (hymo_syscall_nr=).
  *
  * Author: Anatdx
@@ -43,6 +43,7 @@
 #include <linux/mount.h>
 #include <linux/xattr.h>
 #include "hymofs_lkm.h"
+#include "hymofs_ftrace.h"
 #include "hymofs_tracepoint.h"
 
 MODULE_LICENSE("GPL");
@@ -72,8 +73,8 @@ static DEFINE_PER_CPU(char[HYMO_PATH_BUF], hymo_getname_path_buf);
 static atomic_long_t hymo_ioctl_tgid = ATOMIC_LONG_INIT(0);
 static atomic_long_t hymo_xattr_source_tgid = ATOMIC_LONG_INIT(0);
 
-static DEFINE_PER_CPU(struct hymofs_filldir_wrapper, hymo_iterate_wrapper);
-static DEFINE_PER_CPU(int, hymo_iterate_did_swap);
+DEFINE_PER_CPU(struct hymofs_filldir_wrapper, hymo_iterate_wrapper);
+DEFINE_PER_CPU(int, hymo_iterate_did_swap);
 /* When set, we're inside hymofs_populate_injected_list; skip ctx swap in iterate_dir pre. */
 static DEFINE_PER_CPU(int, hymo_in_populate_inject);
 /* Per-CPU path buffer for iterate_dir inject/merge path lookup. */
@@ -2157,7 +2158,9 @@ static inline bool hymo_tp_check_path_syscall(long id)
 	switch (id) {
 	case __NR_openat:
 	case __NR_faccessat:
+#ifdef __NR_newfstatat
 	case __NR_newfstatat:
+#endif
 	case __NR_execve:
 #ifdef __NR_execveat
 	case __NR_execveat:
@@ -2183,6 +2186,11 @@ void hymofs_handle_sys_enter_getfd(struct pt_regs *regs, long id)
 	unsigned long a1 = regs->si;
 	unsigned long a2 = regs->dx;
 	unsigned long a3 = regs->r10;
+#elif defined(__arm__)
+	unsigned long a0 = regs->uregs[0];
+	unsigned long a1 = regs->uregs[1];
+	unsigned long a2 = regs->uregs[2];
+	unsigned long a3 = regs->uregs[3];
 #else
 	return;
 #endif
@@ -2228,6 +2236,8 @@ void hymofs_handle_sys_exit_getfd(struct pt_regs *regs, long ret)
 	regs->regs[0] = this_cpu_read(hymo_override_fd);
 #elif defined(__x86_64__)
 	regs->ax = this_cpu_read(hymo_override_fd);
+#elif defined(__arm__)
+	regs->uregs[0] = this_cpu_read(hymo_override_fd);
 #endif
 	this_cpu_write(hymo_override_active, 0);
 }
@@ -2402,7 +2412,7 @@ static struct hymo_entry *hymofs_reverse_lookup_target(const char *path_str)
  * vfs_getattr kretprobe entry: resolve path, check hymo_targets.
  * Uses ri->data (migration-safe) instead of per-CPU storage.
  */
-static HYMO_NOCFI int hymo_krp_vfs_getattr_entry(struct kretprobe_instance *ri,
+HYMO_NOCFI int hymo_krp_vfs_getattr_entry(struct kretprobe_instance *ri,
 						  struct pt_regs *regs)
 {
 	struct hymo_getattr_ri_data *d = (void *)ri->data;
@@ -2458,7 +2468,7 @@ static HYMO_NOCFI int hymo_krp_vfs_getattr_entry(struct kretprobe_instance *ri,
  * vfs_getattr kretprobe ret: spoof kstat for redirect targets.
  * Makes the file appear to belong to /system with root ownership.
  */
-static int hymo_krp_vfs_getattr_ret(struct kretprobe_instance *ri,
+int hymo_krp_vfs_getattr_ret(struct kretprobe_instance *ri,
 				    struct pt_regs *regs)
 {
 	struct hymo_getattr_ri_data *d = (void *)ri->data;
@@ -2521,7 +2531,7 @@ static HYMO_NOCFI ssize_t hymo_get_selinux_ctx_from_path(struct path *path, char
  * redirect target.  Resolves source path and reads its actual SELinux context
  * from the mounted directory (no hardcoding).
  */
-static HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
+HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
 						   struct pt_regs *regs)
 {
 	struct hymo_getxattr_ri_data *d = (void *)ri->data;
@@ -2673,7 +2683,7 @@ static HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
  * vfs_getxattr kretprobe ret: overwrite value buffer with source path's
  * actual SELinux context (from entry handler) and fix return value.
  */
-static int hymo_krp_vfs_getxattr_ret(struct kretprobe_instance *ri,
+int hymo_krp_vfs_getxattr_ret(struct kretprobe_instance *ri,
 				     struct pt_regs *regs)
 {
 	struct hymo_getxattr_ri_data *d = (void *)ri->data;
@@ -2719,7 +2729,7 @@ static int hymo_kp_d_path_pre(struct kprobe *p, struct pt_regs *regs)
  * to see if it's a redirect target.  d_path signature:
  *   char *d_path(const struct path *path, char *buf, int buflen)
  */
-static HYMO_NOCFI int hymo_krp_d_path_entry(struct kretprobe_instance *ri,
+HYMO_NOCFI int hymo_krp_d_path_entry(struct kretprobe_instance *ri,
 					     struct pt_regs *regs)
 {
 	struct hymo_d_path_ri_data *d = (void *)ri->data;
@@ -2772,7 +2782,7 @@ static HYMO_NOCFI int hymo_krp_d_path_entry(struct kretprobe_instance *ri,
  * We write the source path into the buffer from the end and update the
  * return value register to point to the new start.
  */
-static int hymo_krp_d_path_ret(struct kretprobe_instance *ri,
+int hymo_krp_d_path_ret(struct kretprobe_instance *ri,
 			       struct pt_regs *regs)
 {
 	struct hymo_d_path_ri_data *d = (void *)ri->data;
@@ -2813,7 +2823,7 @@ static int hymo_krp_d_path_ret(struct kretprobe_instance *ri,
  * iterate_dir: pre swaps ctx to our wrapper so kernel runs filldir filter.
  * HYMO_NOCFI: indirect calls to hymo_d_absolute_path / hymo_dentry_path_raw.
  */
-static HYMO_NOCFI int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *regs)
+HYMO_NOCFI int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct file *file;
 	struct hymofs_filldir_wrapper *w;
@@ -2928,11 +2938,6 @@ static HYMO_NOCFI int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *
 	return 0;
 }
 
-struct hymo_iterate_ri_data {
-	int did_swap;
-	struct hymofs_filldir_wrapper *wrapper;
-};
-
 static int hymo_krp_iterate_dir_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct hymo_iterate_ri_data *d = (void *)ri->data;
@@ -2942,7 +2947,7 @@ static int hymo_krp_iterate_dir_entry(struct kretprobe_instance *ri, struct pt_r
 	return 0;
 }
 
-static int hymo_krp_iterate_dir_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+int hymo_krp_iterate_dir_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct hymo_iterate_ri_data *d = (void *)ri->data;
 	(void)regs;
@@ -2973,6 +2978,9 @@ static struct kretprobe hymo_krp_d_path;
 static struct kretprobe hymo_krp_iterate_dir;
 static struct kretprobe hymo_krp_vfs_getxattr;
 static int hymo_getxattr_kprobe_registered;
+static bool hymo_getname_kprobe_registered;
+
+static bool hymo_vfs_use_ftrace;
 
 /* ======================================================================
  * Part 24: Module Init / Exit
@@ -3176,18 +3184,98 @@ static int __init hymofs_lkm_init(void)
 	}
 
 #if HYMOFS_VFS_KPROBES
-	/* Install VFS kprobes (skip getname_flags if tracepoint is used) */
+	/* Install VFS hooks: try ftrace (entry) + kretprobe (exit) first,
+	 * fallback to kprobe+kretprobe. getname_flags always uses kprobe. */
 	{
 		size_t i;
 		int ret;
 		size_t start_idx = (hymofs_tracepoint_path_registered() ? 1 : 0);
 
-		for (i = start_idx; i < HYMOFS_VFS_HOOK_COUNT; i++) {
+#ifdef CONFIG_DYNAMIC_FTRACE
+		{
+			unsigned long ft_addr[4];
+
+			ret = hymofs_ftrace_try_register(ft_addr);
+			if (ret == 0) {
+				hymo_vfs_getxattr_addr = (void *)ft_addr[3];
+				hymo_vfs_use_ftrace = true;
+				pr_info("hymofs: ftrace registered for vfs_getattr, d_path, iterate_dir, vfs_getxattr\n");
+				hymo_krp_vfs_getattr.kp.addr = (kprobe_opcode_t *)ft_addr[0];
+				hymo_krp_vfs_getattr.entry_handler = hymo_ftrace_krp_entry;
+				hymo_krp_vfs_getattr.handler = hymo_ftrace_krp_ret;
+				hymo_krp_vfs_getattr.data_size = sizeof(void *);
+				hymo_krp_vfs_getattr.maxactive = 64;
+				ret = register_kretprobe(&hymo_krp_vfs_getattr);
+				if (ret == 0) {
+					hymo_krp_d_path.kp.addr = (kprobe_opcode_t *)ft_addr[1];
+					hymo_krp_d_path.entry_handler = hymo_ftrace_krp_entry;
+					hymo_krp_d_path.handler = hymo_ftrace_krp_ret;
+					hymo_krp_d_path.data_size = sizeof(void *);
+					hymo_krp_d_path.maxactive = 64;
+					ret = register_kretprobe(&hymo_krp_d_path);
+				}
+				if (ret == 0) {
+					hymo_krp_iterate_dir.kp.addr = (kprobe_opcode_t *)ft_addr[2];
+					hymo_krp_iterate_dir.entry_handler = hymo_ftrace_krp_entry;
+					hymo_krp_iterate_dir.handler = hymo_ftrace_krp_ret;
+					hymo_krp_iterate_dir.data_size = sizeof(void *);
+					hymo_krp_iterate_dir.maxactive = 64;
+					ret = register_kretprobe(&hymo_krp_iterate_dir);
+				}
+				if (ret == 0 && ft_addr[3]) {
+					hymo_krp_vfs_getxattr.kp.addr = (kprobe_opcode_t *)ft_addr[3];
+					hymo_krp_vfs_getxattr.entry_handler = hymo_ftrace_krp_entry;
+					hymo_krp_vfs_getxattr.handler = hymo_ftrace_krp_ret;
+					hymo_krp_vfs_getxattr.data_size = sizeof(void *);
+					hymo_krp_vfs_getxattr.maxactive = 64;
+					ret = register_kretprobe(&hymo_krp_vfs_getxattr);
+					if (ret == 0)
+						hymo_getxattr_kprobe_registered = 1;
+				}
+				if (ret != 0) {
+					hymofs_ftrace_unregister();
+					hymo_vfs_use_ftrace = false;
+					unregister_kretprobe(&hymo_krp_vfs_getattr);
+					unregister_kretprobe(&hymo_krp_d_path);
+					unregister_kretprobe(&hymo_krp_iterate_dir);
+					unregister_kretprobe(&hymo_krp_vfs_getxattr);
+				}
+			} else {
+				pr_warn("hymofs: ftrace registration failed: %d, falling back to kprobes\n", ret);
+			}
+		}
+#endif
+
+		/* getname_flags: always kprobe (needs skip-original) */
+		if (start_idx == 0) {
+			unsigned long addr = hymofs_lookup_name(hymofs_vfs_hooks[0].name);
+			if (!addr) {
+				pr_err("hymofs: symbol not found: %s\n", hymofs_vfs_hooks[0].name);
+				hymofs_tracepoint_path_exit();
+				return -ENOENT;
+			}
+			hymofs_kprobes[0].addr = (kprobe_opcode_t *)addr;
+			hymofs_kprobes[0].pre_handler = hymofs_vfs_hooks[0].pre;
+			ret = register_kprobe(&hymofs_kprobes[0]);
+			if (ret) {
+				pr_err("hymofs: register_kprobe(getname_flags) failed: %d\n", ret);
+				hymofs_tracepoint_path_exit();
+				return ret;
+			}
+			pr_info("hymofs: kprobe getname_flags @0x%lx\n", addr);
+			hymo_getname_kprobe_registered = true;
+		}
+
+		if (!hymo_vfs_use_ftrace) {
+		/* Register kprobes + kretprobes for getattr, d_path, iterate_dir */
+		for (i = 1; i < HYMOFS_VFS_HOOK_COUNT; i++) {
 			unsigned long addr = hymofs_lookup_name(hymofs_vfs_hooks[i].name);
 			if (!addr) {
 				pr_err("hymofs: symbol not found: %s\n", hymofs_vfs_hooks[i].name);
-				for (; i > start_idx; i--)
+				for (; i > 1; i--)
 					unregister_kprobe(&hymofs_kprobes[i - 1]);
+				if (start_idx == 0)
+					unregister_kprobe(&hymofs_kprobes[0]);
 				hymofs_tracepoint_path_exit();
 				return -ENOENT;
 			}
@@ -3197,15 +3285,17 @@ static int __init hymofs_lkm_init(void)
 			if (ret) {
 				pr_err("hymofs: register_kprobe(%s) failed: %d\n",
 				       hymofs_vfs_hooks[i].name, ret);
-				for (; i > start_idx; i--)
+				for (; i > 1; i--)
 					unregister_kprobe(&hymofs_kprobes[i - 1]);
+				if (start_idx == 0)
+					unregister_kprobe(&hymofs_kprobes[0]);
 				hymofs_tracepoint_path_exit();
 				return ret;
 			}
 			pr_info("hymofs: kprobe %s @0x%lx\n", hymofs_vfs_hooks[i].name, addr);
 		}
 
-		/* kretprobes for vfs_getattr and d_path (modify after return) */
+		/* kretprobes for vfs_getattr, d_path, iterate_dir (modify after return) */
 		hymo_krp_vfs_getattr.kp.addr = hymofs_kprobes[HYMOFS_VFS_IDX_GETATTR].addr;
 		hymo_krp_vfs_getattr.entry_handler = hymo_krp_vfs_getattr_entry;
 		hymo_krp_vfs_getattr.handler = hymo_krp_vfs_getattr_ret;
@@ -3214,8 +3304,10 @@ static int __init hymofs_lkm_init(void)
 		ret = register_kretprobe(&hymo_krp_vfs_getattr);
 		if (ret) {
 			pr_err("hymofs: register_kretprobe(vfs_getattr) failed: %d\n", ret);
-			for (i = HYMOFS_VFS_HOOK_COUNT; i > start_idx; i--)
+			for (i = HYMOFS_VFS_HOOK_COUNT; i > 1; i--)
 				unregister_kprobe(&hymofs_kprobes[i - 1]);
+			if (start_idx == 0)
+				unregister_kprobe(&hymofs_kprobes[0]);
 			hymofs_tracepoint_path_exit();
 			return ret;
 		}
@@ -3228,8 +3320,10 @@ static int __init hymofs_lkm_init(void)
 		if (ret) {
 			pr_err("hymofs: register_kretprobe(d_path) failed: %d\n", ret);
 			unregister_kretprobe(&hymo_krp_vfs_getattr);
-			for (i = HYMOFS_VFS_HOOK_COUNT; i > start_idx; i--)
+			for (i = HYMOFS_VFS_HOOK_COUNT; i > 1; i--)
 				unregister_kprobe(&hymofs_kprobes[i - 1]);
+			if (start_idx == 0)
+				unregister_kprobe(&hymofs_kprobes[0]);
 			hymofs_tracepoint_path_exit();
 			return ret;
 		}
@@ -3243,8 +3337,10 @@ static int __init hymofs_lkm_init(void)
 			pr_err("hymofs: register_kretprobe(iterate_dir) failed: %d\n", ret);
 			unregister_kretprobe(&hymo_krp_d_path);
 			unregister_kretprobe(&hymo_krp_vfs_getattr);
-			for (i = HYMOFS_VFS_HOOK_COUNT; i > start_idx; i--)
+			for (i = HYMOFS_VFS_HOOK_COUNT; i > 1; i--)
 				unregister_kprobe(&hymofs_kprobes[i - 1]);
+			if (start_idx == 0)
+				unregister_kprobe(&hymofs_kprobes[0]);
 			hymofs_tracepoint_path_exit();
 			return ret;
 		}
@@ -3271,9 +3367,11 @@ static int __init hymofs_lkm_init(void)
 				pr_warn("hymofs: vfs_getxattr not found, SELinux context spoofing disabled\n");
 			}
 		}
+		} /* !hymo_vfs_use_ftrace */
 	}
-	pr_info("hymofs: initialized (%d VFS kprobes + 3 kretprobes + GET_FD via %s)\n",
+	pr_info("hymofs: initialized (%d VFS %s + GET_FD via %s)\n",
 		(int)(HYMOFS_VFS_HOOK_COUNT - (hymofs_tracepoint_path_registered() ? 1 : 0)),
+		hymo_vfs_use_ftrace ? "ftrace" : "kprobes",
 		hymofs_tracepoint_path_registered() && hymofs_tracepoint_getfd_registered() ?
 			"sys_enter/sys_exit tracepoint" : "kprobes");
 #else
@@ -3301,15 +3399,29 @@ static void __exit hymofs_lkm_exit(void)
 
 #if HYMOFS_VFS_KPROBES
 	hymofs_tracepoint_path_exit();
-	if (hymo_getxattr_kprobe_registered)
-		unregister_kretprobe(&hymo_krp_vfs_getxattr);
-	unregister_kretprobe(&hymo_krp_iterate_dir);
-	unregister_kretprobe(&hymo_krp_d_path);
-	unregister_kretprobe(&hymo_krp_vfs_getattr);
+#ifdef CONFIG_DYNAMIC_FTRACE
+	if (hymo_vfs_use_ftrace) {
+		hymofs_ftrace_unregister();
+		if (hymo_getxattr_kprobe_registered)
+			unregister_kretprobe(&hymo_krp_vfs_getxattr);
+		unregister_kretprobe(&hymo_krp_iterate_dir);
+		unregister_kretprobe(&hymo_krp_d_path);
+		unregister_kretprobe(&hymo_krp_vfs_getattr);
+		if (hymo_getname_kprobe_registered)
+			unregister_kprobe(&hymofs_kprobes[0]);
+	} else
+#endif
 	{
-		size_t i, start = hymofs_tracepoint_path_registered() ? 1 : 0;
-		for (i = start; i < HYMOFS_VFS_HOOK_COUNT; i++)
-			unregister_kprobe(&hymofs_kprobes[i]);
+		if (hymo_getxattr_kprobe_registered)
+			unregister_kretprobe(&hymo_krp_vfs_getxattr);
+		unregister_kretprobe(&hymo_krp_iterate_dir);
+		unregister_kretprobe(&hymo_krp_d_path);
+		unregister_kretprobe(&hymo_krp_vfs_getattr);
+		{
+			size_t i, start = hymofs_tracepoint_path_registered() ? 1 : 0;
+			for (i = start; i < HYMOFS_VFS_HOOK_COUNT; i++)
+				unregister_kprobe(&hymofs_kprobes[i]);
+		}
 	}
 #endif
 
