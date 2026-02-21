@@ -1196,25 +1196,35 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 	}
 
 	if (cmd == HYMO_IOC_SET_UNAME) {
-		struct hymo_spoof_uname u;
-		if (copy_from_user(&u, arg, sizeof(u)))
+		struct hymo_spoof_uname *u = kmalloc(sizeof(*u), GFP_KERNEL);
+		if (!u)
+			return -ENOMEM;
+		if (copy_from_user(u, arg, sizeof(*u))) {
+			kfree(u);
 			return -EFAULT;
+		}
 		spin_lock(&hymo_uname_lock);
-		memcpy(&hymo_spoof_uname_store, &u, sizeof(hymo_spoof_uname_store));
-		hymo_uname_spoof_active = (u.sysname[0] || u.nodename[0] || u.release[0] ||
-					   u.version[0] || u.machine[0] || u.domainname[0]);
+		memcpy(&hymo_spoof_uname_store, u, sizeof(hymo_spoof_uname_store));
+		hymo_uname_spoof_active = (u->sysname[0] || u->nodename[0] || u->release[0] ||
+					   u->version[0] || u->machine[0] || u->domainname[0]);
 		spin_unlock(&hymo_uname_lock);
+		kfree(u);
 		return 0;
 	}
 
 	if (cmd == HYMO_IOC_SET_CMDLINE) {
-		struct hymo_spoof_cmdline c;
-		if (copy_from_user(&c, arg, sizeof(c)))
+		struct hymo_spoof_cmdline *c = kmalloc(sizeof(*c), GFP_KERNEL);
+		if (!c)
+			return -ENOMEM;
+		if (copy_from_user(c, arg, sizeof(*c))) {
+			kfree(c);
 			return -EFAULT;
+		}
 		spin_lock(&hymo_cmdline_lock);
-		strscpy(hymo_spoof_cmdline, c.cmdline, sizeof(hymo_spoof_cmdline));
-		hymo_cmdline_spoof_active = (c.cmdline[0] != '\0');
+		strscpy(hymo_spoof_cmdline, c->cmdline, sizeof(hymo_spoof_cmdline));
+		hymo_cmdline_spoof_active = (c->cmdline[0] != '\0');
 		spin_unlock(&hymo_cmdline_lock);
+		kfree(c);
 		return 0;
 	}
 
