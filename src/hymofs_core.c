@@ -2229,7 +2229,7 @@ void hymofs_handle_sys_enter_path(struct pt_regs *regs, long id)
 	char *buf;
 	char *target;
 	char __user *new_path;
-	u64 *path_reg;
+	unsigned long *path_reg;
 
 	if (!hymo_tp_check_path_syscall(id))
 		return;
@@ -2263,7 +2263,7 @@ void hymofs_handle_sys_enter_path(struct pt_regs *regs, long id)
 	if (unlikely(hymofs_should_hide(buf))) {
 		new_path = hymo_userspace_stack_buffer(HYMO_HIDE_PATH, sizeof(HYMO_HIDE_PATH));
 		if (new_path)
-			*path_reg = (u64)(uintptr_t)new_path;
+			*path_reg = (unsigned long)(uintptr_t)new_path;
 		return;
 	}
 
@@ -2281,7 +2281,7 @@ void hymofs_handle_sys_enter_path(struct pt_regs *regs, long id)
 		new_path = hymo_userspace_stack_buffer(target, tlen);
 		kfree(target);
 		if (new_path)
-			*path_reg = (u64)(uintptr_t)new_path;
+			*path_reg = (unsigned long)(uintptr_t)new_path;
 	}
 }
 
