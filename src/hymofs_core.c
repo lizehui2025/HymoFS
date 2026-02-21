@@ -176,6 +176,12 @@ static bool hymo_cmdline_spoof_active;
 static pid_t hymo_daemon_pid;
 static DEFINE_SPINLOCK(hymo_daemon_lock);
 
+/* Kprobe registration flags (used by GET_FEATURES before their definitions) */
+static int hymo_uname_kprobe_registered;
+static int hymo_cmdline_kprobe_registered;
+static int hymo_cmdline_kretprobe_registered;
+static int hymo_getxattr_kprobe_registered;
+
 static DECLARE_BITMAP(hymo_path_bloom, HYMO_BLOOM_SIZE);
 static DECLARE_BITMAP(hymo_hide_bloom, HYMO_BLOOM_SIZE);
 /* hymo_rule_count and hymo_hide_count declared above */
@@ -2002,7 +2008,6 @@ static struct kretprobe hymo_krp_uname = {
 	.data_size = sizeof(void __user *),
 	.maxactive = 64,
 };
-static int hymo_uname_kprobe_registered;
 
 /* ======================================================================
  * cmdline spoofing: kprobe pre_handler on cmdline_proc_show
@@ -2055,7 +2060,6 @@ static int hymo_cmdline_pre(struct kprobe *p, struct pt_regs *regs)
 static struct kprobe hymo_kp_cmdline = {
 	.pre_handler = hymo_cmdline_pre,
 };
-static int hymo_cmdline_kprobe_registered;
 
 /* kretprobe fallback for cmdline when tracepoint unavailable */
 static int hymo_cmdline_read_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
@@ -2083,7 +2087,6 @@ static struct kretprobe hymo_krp_cmdline_read = {
 	.handler = hymo_cmdline_read_ret,
 	.maxactive = 64,
 };
-static int hymo_cmdline_kretprobe_registered;
 
 /* ======================================================================
  * iterate_dir: filldir filter (runs in fs callback context, not kprobe)
@@ -2412,9 +2415,9 @@ void hymofs_handle_sys_enter_cmdline(struct pt_regs *regs, long id)
 	if (!hymo_fd_is_proc_cmdline((int)fd))
 		return;
 
-	this_cpu_ptr(hymo_cmdline_read_ctx)->buf = (char __user *)buf;
-	this_cpu_ptr(hymo_cmdline_read_ctx)->count = (size_t)count;
-	this_cpu_ptr(hymo_cmdline_read_ctx)->active = 1;
+	this_cpu_ptr(&hymo_cmdline_read_ctx)->buf = (char __user *)buf;
+	this_cpu_ptr(&hymo_cmdline_read_ctx)->count = (size_t)count;
+	this_cpu_ptr(&hymo_cmdline_read_ctx)->active = 1;
 #endif
 }
 
@@ -3199,7 +3202,6 @@ static struct kretprobe hymo_krp_vfs_getattr;
 static struct kretprobe hymo_krp_d_path;
 static struct kretprobe hymo_krp_iterate_dir;
 static struct kretprobe hymo_krp_vfs_getxattr;
-static int hymo_getxattr_kprobe_registered;
 static bool hymo_getname_kprobe_registered;
 
 static bool hymo_vfs_use_ftrace;
@@ -3406,8 +3408,10 @@ static int __init hymofs_lkm_init(void)
 	}
 
 	/* cmdline spoofing: tracepoint when available, else kretprobe on read, else kprobe on cmdline_proc_show */
-	if (!hymofs_tracepoint_path_registered() || !hymofs_tracepoint_getfd_registered()) {
-		const char *read_sym =
+	{
+		int ret;
+		if (!hymofs_tracepoint_path_registered() || !hymofs_tracepoint_getfd_registered()) {
+			const char *read_sym =
 #if defined(__aarch64__)
 			"__arm64_sys_read";
 #elif defined(__x86_64__)
@@ -3442,6 +3446,7 @@ static int __init hymofs_lkm_init(void)
 		}
 	} else {
 		pr_info("hymofs: cmdline spoofing via tracepoint (sys_enter/sys_exit)\n");
+	}
 	}
 
 #if HYMOFS_VFS_KPROBES
