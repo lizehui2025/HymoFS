@@ -2755,7 +2755,7 @@ HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
 	struct dentry *dentry;
 	const char *xattr_name;
 	struct inode *inode;
-	char tmp[256];
+	char *tmp;  /* heap to avoid arm32 frame-larger-than=1024 */
 	char *dp;
 	struct hymo_entry *entry;
 	struct path src_path;
@@ -2794,24 +2794,27 @@ HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
 	if (!test_bit(AS_FLAGS_HYMO_SPOOF_KSTAT, &inode->i_mapping->flags))
 		return 0;
 
+	tmp = kmalloc(256 + 256 + 256 + 256 + 512, GFP_KERNEL);
+	if (!tmp)
+		return 0;
+
 	/* Resolve target path for reverse lookup. dentry_path_raw gives path
 	 * relative to fs root; try full path and /data + rel for common Android layout. */
 	dp = ERR_PTR(-ENOENT);
 	if (hymo_dentry_path_raw)
-		dp = hymo_dentry_path_raw(dentry, tmp, sizeof(tmp));
+		dp = hymo_dentry_path_raw(dentry, tmp, 256);
 	if (IS_ERR_OR_NULL(dp) || dp[0] != '/')
-		return 0;
+		goto out_free;
 
 	rcu_read_lock();
 	entry = hymofs_reverse_lookup_target(dp);
 	if (!entry && dp[0] == '/' && dp[1] != '\0') {
-		char full[256];
-		if (snprintf(full, sizeof(full), "/data%s", dp) < (int)sizeof(full))
-			entry = hymofs_reverse_lookup_target(full);
+		if (snprintf(tmp + 256, 256, "/data%s", dp) < 256)
+			entry = hymofs_reverse_lookup_target(tmp + 256);
 	}
 	rcu_read_unlock();
 	if (!entry || !entry->src)
-		return 0;
+		goto out_free;
 
 	/* Resolve source path (bypass redirect) and get its actual SELinux context.
 	 * When source file doesn't exist (e.g. overlay dir is empty), try parent
@@ -2819,9 +2822,9 @@ HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
 	 * path (e.g. /system/product -> /product), then try resolved+remainder. */
 	atomic_long_set(&hymo_xattr_source_tgid, (long)task_tgid_vnr(current));
 	if (hymo_kern_path) {
-		char parent[256];
-		char resolved[256];
-		char alt[512];
+		char *parent = tmp + 512;
+		char *resolved = tmp + 768;
+		char *alt = tmp + 1024;
 		const char *try_path = entry->src;
 		size_t len = strlen(entry->src);
 		size_t parent_len;
@@ -2840,7 +2843,7 @@ HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
 			}
 			/* Logical path failed: try parent, get resolved path via d_absolute_path,
 			 * then try resolved+remainder (handles any symlink, not just /system/product). */
-			if (len >= sizeof(parent))
+			if (len >= 256)
 				break;
 			memcpy(parent, try_path, len + 1);
 			{
@@ -2854,13 +2857,13 @@ HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
 				char *res = NULL;
 				bool got_ctx = false;
 				if (hymo_d_absolute_path)
-					res = hymo_d_absolute_path(&src_path, resolved, sizeof(resolved));
+					res = hymo_d_absolute_path(&src_path, resolved, 256);
 				if (IS_ERR_OR_NULL(res) && hymo_dentry_path_raw)
-					res = hymo_dentry_path_raw(src_path.dentry, resolved, sizeof(resolved));
+					res = hymo_dentry_path_raw(src_path.dentry, resolved, 256);
 				if (res && !IS_ERR(res) && res[0] == '/' &&
 				    parent_len < len && try_path[parent_len] == '/') {
 					const char *remainder = try_path + parent_len;
-					if (snprintf(alt, sizeof(alt), "%s%s", res, remainder) < (int)sizeof(alt) &&
+					if (snprintf(alt, 512, "%s%s", res, remainder) < 512 &&
 					    strcmp(alt, try_path) != 0) {
 						struct path alt_path;
 						if (hymo_kern_path(alt, LOOKUP_FOLLOW, &alt_path) == 0) {
@@ -2893,6 +2896,8 @@ HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
 	d->value_buf = (void *)HYMO_GETXATTR_VALUE_REG(regs);
 	d->value_size = (size_t)HYMO_GETXATTR_SIZE_REG(regs);
 
+out_free:
+	kfree(tmp);
 	return 0;
 }
 
