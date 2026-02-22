@@ -182,6 +182,13 @@ static int hymo_cmdline_kprobe_registered;
 static int hymo_cmdline_kretprobe_registered;
 static int hymo_getxattr_kprobe_registered;
 
+/* Forward declarations for hymo_export_hooks_status (HYMO_IOC_GET_HOOKS) */
+static int hymo_ni_kprobe_registered;
+static int hymo_reboot_kprobe_registered;
+static int hymo_syscall_nr_param = 142;
+static bool hymo_getname_kprobe_registered;
+static bool hymo_vfs_use_ftrace;
+
 static DECLARE_BITMAP(hymo_path_bloom, HYMO_BLOOM_SIZE);
 static DECLARE_BITMAP(hymo_hide_bloom, HYMO_BLOOM_SIZE);
 /* hymo_rule_count and hymo_hide_count declared above */
@@ -1823,7 +1830,6 @@ int hymofs_get_anon_fd(void)
 EXPORT_SYMBOL_GPL(hymofs_get_anon_fd);
 
 /* GET_FD via kprobe on ni_syscall (unused nr) or __arm64_sys_reboot (142). Default 142 = SYS_reboot for 5.10 compat. */
-static int hymo_syscall_nr_param = 142;
 module_param_named(hymo_syscall_nr, hymo_syscall_nr_param, int, 0600);
 MODULE_PARM_DESC(hymo_syscall_nr, "For ni_syscall path: unused syscall nr (e.g. 448). Primary path is SYS_reboot(142) via __arm64_sys_reboot kprobe.");
 
@@ -1908,7 +1914,6 @@ static struct kprobe hymo_kp_ni = {
 static struct kretprobe hymo_krp_ni = {
 	.handler = hymo_ni_syscall_ret,
 };
-static int hymo_ni_kprobe_registered;
 
 /*
  * GET_FD via kprobe on __arm64_sys_reboot (same as susfs/KernelSU old kprobes).
@@ -1982,7 +1987,6 @@ static struct kprobe hymo_kp_reboot = {
 static struct kretprobe hymo_krp_reboot = {
 	.handler = hymo_ni_syscall_ret, /* same: replace return with fd */
 };
-static int hymo_reboot_kprobe_registered;
 
 /*
  * GET_FD via prctl (SECCOMP-safe). option=HYMO_PRCTL_GET_FD, arg2=(int *) for fd.
@@ -3304,9 +3308,6 @@ static struct kretprobe hymo_krp_vfs_getattr;
 static struct kretprobe hymo_krp_d_path;
 static struct kretprobe hymo_krp_iterate_dir;
 static struct kretprobe hymo_krp_vfs_getxattr;
-static bool hymo_getname_kprobe_registered;
-
-static bool hymo_vfs_use_ftrace;
 
 /* ======================================================================
  * Part 24: Module Init / Exit
