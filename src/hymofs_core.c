@@ -92,6 +92,25 @@ static DEFINE_PER_CPU(char[HYMO_ITERATE_PATH_BUF], hymo_iterate_dir_path);
 /* Resolved once at init via kprobe; then we use it for all lookups. */
 static unsigned long (*hymofs_kallsyms_lookup_name)(const char *name);
 
+/* Validate that a kernel address is in valid range (prevents NULL and invalid ptr) */
+static bool hymofs_valid_kernel_addr(unsigned long addr)
+{
+	if (!addr)
+		return false;
+	/* Check for common error values that can be returned */
+	if (IS_ERR_VALUE(addr))
+		return false;
+	/* On most architectures, kernel space starts at 0xffff... or 0xc000... */
+#if defined(CONFIG_64BIT)
+	/* Kernel addresses on 64-bit typically have upper bits set */
+	return (addr >= 0xffff800000000000UL) ||
+	       (addr >= 0xffffffff80000000UL && addr < 0xffffffffc0000000UL);
+#else
+	/* 32-bit kernel space */
+	return addr >= PAGE_OFFSET;
+#endif
+}
+
 /*
  * Resolve kernel symbol by name. We do NOT rely on the kernel exporting
  * anything: first try to get kallsyms_lookup_name itself via kprobe, then
@@ -123,25 +142,6 @@ HYMO_NOCFI unsigned long hymofs_lookup_name(const char *name)
 		}
 		return addr;
 	}
-}
-
-/* Validate that a kernel address is in valid range (prevents NULL and invalid ptr) */
-static bool hymofs_valid_kernel_addr(unsigned long addr)
-{
-	if (!addr)
-		return false;
-	/* Check for common error values that can be returned */
-	if (IS_ERR_VALUE(addr))
-		return false;
-	/* On most architectures, kernel space starts at 0xffff... or 0xc000... */
-#if defined(CONFIG_64BIT)
-	/* Kernel addresses on 64-bit typically have upper bits set */
-	return (addr >= 0xffff800000000000UL) ||
-	       (addr >= 0xffffffff80000000UL && addr < 0xffffffffc0000000UL);
-#else
-	/* 32-bit kernel space */
-	return addr >= PAGE_OFFSET;
-#endif
 }
 
 /* Call once at init to steal kallsyms_lookup_name via kprobe. */
