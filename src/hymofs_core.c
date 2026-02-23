@@ -148,67 +148,28 @@ HYMO_NOCFI unsigned long hymofs_lookup_name(const char *name)
 	}
 }
 
-/* kallsyms_on_each_symbol callback to find kallsyms_lookup_name */
-struct hymo_kallsyms_cb_data {
-	const char *target_name;
-	unsigned long *result_addr;
-};
-
-#ifdef CONFIG_KALLSYMS
-static int hymo_kallsyms_cb(void *data, const char *name, struct module *mod, unsigned long addr)
-{
-	struct hymo_kallsyms_cb_data *cb_data = data;
-	(void)mod;
-	if (name && cb_data->target_name &&
-	    strcmp(name, cb_data->target_name) == 0) {
-		*cb_data->result_addr = addr;
-		return 1; /* Stop iteration */
-	}
-	return 0;
-}
-#endif
-
-/* Call once at init to get kallsyms_lookup_name via multiple methods. */
+/* Call once at init to steal kallsyms_lookup_name via kprobe. */
 static void hymofs_resolve_kallsyms_lookup(void)
 {
-#ifdef CONFIG_KALLSYMS
-	/* Method 1: Try kallsyms_on_each_symbol if available (safer than kprobe) */
-	struct hymo_kallsyms_cb_data cb_data = {
-		.target_name = "kallsyms_lookup_name",
-		.result_addr = (unsigned long *)&hymofs_kallsyms_lookup_name,
-	};
+	struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
+	int ret;
 
-	pr_alert("hymofs: trying kallsyms_on_each_symbol...\n");
-	if (kallsyms_on_each_symbol(hymo_kallsyms_cb, &cb_data) > 0 &&
-	    hymofs_kallsyms_lookup_name) {
-		pr_alert("hymofs: kallsyms_lookup_name via iterator @ 0x%lx\n",
-			(unsigned long)hymofs_kallsyms_lookup_name);
+	pr_alert("hymofs: resolving kallsyms_lookup_name...\n");
+	ret = register_kprobe(&kp);
+	if (ret < 0) {
+		pr_alert("hymofs: kprobe kallsyms_lookup_name failed: %d, using per-symbol kprobe\n", ret);
 		return;
 	}
-#endif
-
-	/* Method 2: Try kprobe (may crash on GKI, but try anyway) */
-	{
-		struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
-		int ret;
-
-		pr_alert("hymofs: trying kprobe on kallsyms_lookup_name...\n");
-		ret = register_kprobe(&kp);
-		if (ret < 0) {
-			pr_alert("hymofs: kprobe kallsyms_lookup_name failed: %d\n", ret);
-			return;
-		}
-		if (!hymofs_valid_kernel_addr((unsigned long)kp.addr)) {
-			pr_alert("hymofs: kallsyms_lookup_name invalid addr: 0x%lx\n",
-				(unsigned long)kp.addr);
-			unregister_kprobe(&kp);
-			return;
-		}
-		hymofs_kallsyms_lookup_name = (void *)kp.addr;
+	if (!hymofs_valid_kernel_addr((unsigned long)kp.addr)) {
+		pr_alert("hymofs: kallsyms_lookup_name returned invalid address: 0x%lx\n",
+			(unsigned long)kp.addr);
 		unregister_kprobe(&kp);
-		pr_alert("hymofs: kallsyms_lookup_name via kprobe @ 0x%lx\n",
-			(unsigned long)hymofs_kallsyms_lookup_name);
+		return;
 	}
+	hymofs_kallsyms_lookup_name = (void *)kp.addr;
+	unregister_kprobe(&kp);
+	pr_alert("hymofs: kallsyms_lookup_name resolved @ 0x%lx\n",
+		(unsigned long)hymofs_kallsyms_lookup_name);
 }
 
 /* Constants & data structures are in hymofs_lkm.h */
@@ -1933,10 +1894,9 @@ static int hymo_skip_getfd_param;
 module_param_named(hymo_skip_getfd, hymo_skip_getfd_param, int, 0600);
 MODULE_PARM_DESC(hymo_skip_getfd, "1=skip GET_FD kprobe/tracepoint. For debugging crash.");
 
-/* Skip kallsyms resolution - set to 1 if module crashes during symbol resolution */
 static int hymo_skip_kallsyms_param;
 module_param_named(hymo_skip_kallsyms, hymo_skip_kallsyms_param, int, 0600);
-MODULE_PARM_DESC(hymo_skip_kallsyms, "1=skip kallsyms resolution, use per-symbol kprobe. 0=try kallsyms (default).");
+MODULE_PARM_DESC(hymo_skip_kallsyms, "1=skip kallsyms resolution, use per-symbol kprobe. For GKI compatibility.");
 
 /* Dummy mode: exit immediately after first log - for testing module loading */
 static int hymo_dummy_mode_param;
