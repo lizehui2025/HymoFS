@@ -101,29 +101,65 @@ HYMO_NOCFI unsigned long hymofs_lookup_name(const char *name)
 {
 	if (hymofs_kallsyms_lookup_name) {
 		unsigned long addr = hymofs_kallsyms_lookup_name(name);
-		if (addr)
+		if (addr && !IS_ERR_VALUE(addr))
 			return addr;
 	}
 	/* Fallback: kprobe on the target symbol gives us its address */
 	{
 		struct kprobe kp = { .symbol_name = name };
 		unsigned long addr;
+		int ret;
 
-		if (register_kprobe(&kp) < 0)
+		ret = register_kprobe(&kp);
+		if (ret < 0) {
+			pr_debug("hymofs: kprobe %s failed: %d\n", name, ret);
 			return 0;
+		}
 		addr = (unsigned long)kp.addr;
 		unregister_kprobe(&kp);
+		if (!hymofs_valid_kernel_addr(addr)) {
+			pr_warn("hymofs: symbol %s returned invalid addr 0x%lx\n", name, addr);
+			return 0;
+		}
 		return addr;
 	}
+}
+
+/* Validate that a kernel address is in valid range (prevents NULL and invalid ptr) */
+static bool hymofs_valid_kernel_addr(unsigned long addr)
+{
+	if (!addr)
+		return false;
+	/* Check for common error values that can be returned */
+	if (IS_ERR_VALUE(addr))
+		return false;
+	/* On most architectures, kernel space starts at 0xffff... or 0xc000... */
+#if defined(CONFIG_64BIT)
+	/* Kernel addresses on 64-bit typically have upper bits set */
+	return (addr >= 0xffff800000000000UL) ||
+	       (addr >= 0xffffffff80000000UL && addr < 0xffffffffc0000000UL);
+#else
+	/* 32-bit kernel space */
+	return addr >= PAGE_OFFSET;
+#endif
 }
 
 /* Call once at init to steal kallsyms_lookup_name via kprobe. */
 static void hymofs_resolve_kallsyms_lookup(void)
 {
 	struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
+	int ret;
 
-	if (register_kprobe(&kp) < 0)
+	ret = register_kprobe(&kp);
+	if (ret < 0) {
+		pr_warn("hymofs: kprobe kallsyms_lookup_name failed: %d, using per-symbol kprobe\n", ret);
 		return;
+	}
+	if (!hymofs_valid_kernel_addr((unsigned long)kp.addr)) {
+		pr_warn("hymofs: kallsyms_lookup_name returned invalid address\n");
+		unregister_kprobe(&kp);
+		return;
+	}
 	hymofs_kallsyms_lookup_name = (void *)kp.addr;
 	unregister_kprobe(&kp);
 	pr_info("hymofs: using kallsyms_lookup_name for symbol resolution\n");
@@ -3316,10 +3352,12 @@ static struct kretprobe hymo_krp_vfs_getxattr;
 static int __init hymofs_lkm_init(void)
 {
 	pr_info("hymofs: initializing LKM v%s\n", HYMOFS_VERSION);
+	pr_info("hymofs: STAGE 1: resolving kallsyms\n");
 
 	/* Resolve kallsyms first - broader symbol access than kprobe on some GKI kernels. */
 	hymofs_resolve_kallsyms_lookup();
 
+	pr_info("hymofs: STAGE 2: resolving VFS symbols\n");
 	/*
 	 * Resolve ALL VFS symbols via kallsyms/kprobe - GKI kernels protect these
 	 * behind namespaces or don't export them at all.
@@ -3369,6 +3407,7 @@ static int __init hymofs_lkm_init(void)
 	if (!hymo_d_absolute_path && !hymo_dentry_path_raw)
 		pr_warn("hymofs: neither d_absolute_path nor dentry_path_raw found, inject/merge listing disabled\n");
 
+	pr_info("hymofs: STAGE 3: initializing hash tables\n");
 	/* Initialize hash tables */
 	hash_init(hymo_paths);
 	hash_init(hymo_targets);
@@ -3377,6 +3416,7 @@ static int __init hymofs_lkm_init(void)
 	hash_init(hymo_xattr_sbs);
 	hash_init(hymo_merge_dirs);
 
+	pr_info("hymofs: STAGE 4: resolving /system path\n");
 	/* Resolve /system device number for stat spoofing */
 	if (hymo_kern_path) {
 		struct path sys_path;
@@ -3390,10 +3430,12 @@ static int __init hymofs_lkm_init(void)
 		}
 	}
 
+	pr_info("hymofs: STAGE 5: registering tracepoints\n");
 	/* Try tracepoint for path redirect + GET_FD first. Tracepoint supports multiple listeners (KSU + HymoFS can coexist). */
 	if (!hymo_no_tracepoint_param)
 		(void)hymofs_tracepoint_path_init();
 
+	pr_info("hymofs: STAGE 6: registering GET_FD kprobes\n");
 	/* GET_FD: use tracepoint if available, else kprobe */
 	if (hymo_syscall_nr_param <= 0) {
 		pr_err("hymofs: hymo_syscall_nr must be positive (got %d)\n", hymo_syscall_nr_param);
@@ -3560,6 +3602,7 @@ static int __init hymofs_lkm_init(void)
 	}
 	}
 
+	pr_info("hymofs: STAGE 7: registering VFS hooks\n");
 #if HYMOFS_VFS_KPROBES
 	/* Install VFS hooks: try ftrace (entry) + kretprobe (exit) first,
 	 * fallback to kprobe+kretprobe. getname_flags always uses kprobe. */
