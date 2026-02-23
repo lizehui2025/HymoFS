@@ -1898,6 +1898,11 @@ static int hymo_skip_kallsyms_param;
 module_param_named(hymo_skip_kallsyms, hymo_skip_kallsyms_param, int, 0600);
 MODULE_PARM_DESC(hymo_skip_kallsyms, "1=skip kallsyms resolution, use per-symbol kprobe. For GKI compatibility.");
 
+/* Dummy mode: exit immediately after first log - for testing module loading */
+static int hymo_dummy_mode_param;
+module_param_named(hymo_dummy_mode, hymo_dummy_mode_param, int, 0600);
+MODULE_PARM_DESC(hymo_dummy_mode, "1=exit immediately after init starts (for testing).");
+
 /* Per-CPU: when set, kretprobe will replace return value with this fd. */
 static DEFINE_PER_CPU(int, hymo_override_fd);
 static DEFINE_PER_CPU(int, hymo_override_active);
@@ -3377,6 +3382,13 @@ static int __init hymofs_lkm_init(void)
 {
 	/* Use pr_alert for early logging - more likely to survive crash */
 	pr_alert("hymofs: === INIT START v%s ===\n", HYMOFS_VERSION);
+
+	/* Dummy mode: exit immediately - for testing module loading itself */
+	if (hymo_dummy_mode_param) {
+		pr_alert("hymofs: DUMMY MODE - exiting immediately\n");
+		return 0;
+	}
+
 	pr_alert("hymofs: skip_kallsyms=%d skip_vfs=%d skip_extra=%d skip_getfd=%d\n",
 		hymo_skip_kallsyms_param, hymo_skip_vfs_param,
 		hymo_skip_extra_kprobes_param, hymo_skip_getfd_param);
