@@ -100,11 +100,14 @@ static bool hymofs_valid_kernel_addr(unsigned long addr)
 	/* Check for common error values that can be returned */
 	if (IS_ERR_VALUE(addr))
 		return false;
-	/* On most architectures, kernel space starts at 0xffff... or 0xc000... */
+	/*
+	 * On ARM64 with KASLR (GKI 5.15+), kernel addresses are in the high half
+	 * of the address space. Just check that top bits are set (kernel space).
+	 * Be permissive - let the kernel's own checks catch truly invalid addresses.
+	 */
 #if defined(CONFIG_64BIT)
-	/* Kernel addresses on 64-bit typically have upper bits set */
-	return (addr >= 0xffff800000000000UL) ||
-	       (addr >= 0xffffffff80000000UL && addr < 0xffffffffc0000000UL);
+	/* Any address with top bit set is in kernel space on 64-bit */
+	return (addr & (1UL << 63)) != 0;
 #else
 	/* 32-bit kernel space */
 	return addr >= PAGE_OFFSET;
@@ -131,13 +134,14 @@ HYMO_NOCFI unsigned long hymofs_lookup_name(const char *name)
 
 		ret = register_kprobe(&kp);
 		if (ret < 0) {
-			pr_debug("hymofs: kprobe %s failed: %d\n", name, ret);
+			pr_alert("hymofs: kprobe %s failed: %d\n", name, ret);
 			return 0;
 		}
 		addr = (unsigned long)kp.addr;
 		unregister_kprobe(&kp);
-		if (!hymofs_valid_kernel_addr(addr)) {
-			pr_warn("hymofs: symbol %s returned invalid addr 0x%lx\n", name, addr);
+		/* Just check for NULL and error values, trust kernel kprobe result */
+		if (!addr || IS_ERR_VALUE(addr)) {
+			pr_alert("hymofs: symbol %s returned invalid addr 0x%lx\n", name, addr);
 			return 0;
 		}
 		return addr;
@@ -150,19 +154,22 @@ static void hymofs_resolve_kallsyms_lookup(void)
 	struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
 	int ret;
 
+	pr_alert("hymofs: resolving kallsyms_lookup_name...\n");
 	ret = register_kprobe(&kp);
 	if (ret < 0) {
-		pr_warn("hymofs: kprobe kallsyms_lookup_name failed: %d, using per-symbol kprobe\n", ret);
+		pr_alert("hymofs: kprobe kallsyms_lookup_name failed: %d, using per-symbol kprobe\n", ret);
 		return;
 	}
 	if (!hymofs_valid_kernel_addr((unsigned long)kp.addr)) {
-		pr_warn("hymofs: kallsyms_lookup_name returned invalid address\n");
+		pr_alert("hymofs: kallsyms_lookup_name returned invalid address: 0x%lx\n",
+			(unsigned long)kp.addr);
 		unregister_kprobe(&kp);
 		return;
 	}
 	hymofs_kallsyms_lookup_name = (void *)kp.addr;
 	unregister_kprobe(&kp);
-	pr_info("hymofs: using kallsyms_lookup_name for symbol resolution\n");
+	pr_alert("hymofs: kallsyms_lookup_name resolved @ 0x%lx\n",
+		(unsigned long)hymofs_kallsyms_lookup_name);
 }
 
 /* Constants & data structures are in hymofs_lkm.h */
