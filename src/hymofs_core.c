@@ -1881,6 +1881,23 @@ static int hymo_no_tracepoint_param;
 module_param_named(hymo_no_tracepoint, hymo_no_tracepoint_param, int, 0600);
 MODULE_PARM_DESC(hymo_no_tracepoint, "1=skip sys_enter tracepoint, use kprobe. 0=try tracepoint first (default).");
 
+/* Debug: skip various initialization stages to isolate crash */
+static int hymo_skip_vfs_param;
+module_param_named(hymo_skip_vfs, hymo_skip_vfs_param, int, 0600);
+MODULE_PARM_DESC(hymo_skip_vfs, "1=skip VFS hooks (ftrace+kprobes). For debugging crash.");
+
+static int hymo_skip_extra_kprobes_param;
+module_param_named(hymo_skip_extra_kprobes, hymo_skip_extra_kprobes_param, int, 0600);
+MODULE_PARM_DESC(hymo_skip_extra_kprobes, "1=skip extra kprobes (reboot,prctl,uname,cmdline). For debugging.");
+
+static int hymo_skip_getfd_param;
+module_param_named(hymo_skip_getfd, hymo_skip_getfd_param, int, 0600);
+MODULE_PARM_DESC(hymo_skip_getfd, "1=skip GET_FD kprobe/tracepoint. For debugging crash.");
+
+static int hymo_skip_kallsyms_param;
+module_param_named(hymo_skip_kallsyms, hymo_skip_kallsyms_param, int, 0600);
+MODULE_PARM_DESC(hymo_skip_kallsyms, "1=skip kallsyms resolution, use per-symbol kprobe. For GKI compatibility.");
+
 /* Per-CPU: when set, kretprobe will replace return value with this fd. */
 static DEFINE_PER_CPU(int, hymo_override_fd);
 static DEFINE_PER_CPU(int, hymo_override_active);
@@ -3358,13 +3375,21 @@ static struct kretprobe hymo_krp_vfs_getxattr;
 
 static int __init hymofs_lkm_init(void)
 {
-	pr_info("hymofs: initializing LKM v%s\n", HYMOFS_VERSION);
-	pr_info("hymofs: STAGE 1: resolving kallsyms\n");
+	/* Use pr_alert for early logging - more likely to survive crash */
+	pr_alert("hymofs: === INIT START v%s ===\n", HYMOFS_VERSION);
+	pr_alert("hymofs: skip_kallsyms=%d skip_vfs=%d skip_extra=%d skip_getfd=%d\n",
+		hymo_skip_kallsyms_param, hymo_skip_vfs_param,
+		hymo_skip_extra_kprobes_param, hymo_skip_getfd_param);
+
+	pr_alert("hymofs: STAGE 1: resolving kallsyms\n");
 
 	/* Resolve kallsyms first - broader symbol access than kprobe on some GKI kernels. */
-	hymofs_resolve_kallsyms_lookup();
+	if (!hymo_skip_kallsyms_param)
+		hymofs_resolve_kallsyms_lookup();
+	else
+		pr_alert("hymofs: skipping kallsyms (using per-symbol kprobe)\n");
 
-	pr_info("hymofs: STAGE 2: resolving VFS symbols\n");
+	pr_alert("hymofs: STAGE 2: resolving VFS symbols\n");
 	/*
 	 * Resolve ALL VFS symbols via kallsyms/kprobe - GKI kernels protect these
 	 * behind namespaces or don't export them at all.
@@ -3414,7 +3439,7 @@ static int __init hymofs_lkm_init(void)
 	if (!hymo_d_absolute_path && !hymo_dentry_path_raw)
 		pr_warn("hymofs: neither d_absolute_path nor dentry_path_raw found, inject/merge listing disabled\n");
 
-	pr_info("hymofs: STAGE 3: initializing hash tables\n");
+	pr_alert("hymofs: STAGE 3: initializing hash tables\n");
 	/* Initialize hash tables */
 	hash_init(hymo_paths);
 	hash_init(hymo_targets);
@@ -3423,7 +3448,7 @@ static int __init hymofs_lkm_init(void)
 	hash_init(hymo_xattr_sbs);
 	hash_init(hymo_merge_dirs);
 
-	pr_info("hymofs: STAGE 4: resolving /system path\n");
+	pr_alert("hymofs: STAGE 4: resolving /system path\n");
 	/* Resolve /system device number for stat spoofing */
 	if (hymo_kern_path) {
 		struct path sys_path;
@@ -3437,12 +3462,12 @@ static int __init hymofs_lkm_init(void)
 		}
 	}
 
-	pr_info("hymofs: STAGE 5: registering tracepoints\n");
+	pr_alert("hymofs: STAGE 5: registering tracepoints\n");
 	/* Try tracepoint for path redirect + GET_FD first. Tracepoint supports multiple listeners (KSU + HymoFS can coexist). */
 	if (!hymo_no_tracepoint_param)
 		(void)hymofs_tracepoint_path_init();
 
-	pr_info("hymofs: STAGE 6: registering GET_FD kprobes\n");
+	pr_alert("hymofs: STAGE 6: registering GET_FD kprobes\n");
 	/* GET_FD: use tracepoint if available, else kprobe */
 	if (hymo_syscall_nr_param <= 0) {
 		pr_err("hymofs: hymo_syscall_nr must be positive (got %d)\n", hymo_syscall_nr_param);
@@ -3609,7 +3634,7 @@ static int __init hymofs_lkm_init(void)
 	}
 	}
 
-	pr_info("hymofs: STAGE 7: registering VFS hooks\n");
+	pr_alert("hymofs: STAGE 7: registering VFS hooks\n");
 #if HYMOFS_VFS_KPROBES
 	/* Install VFS hooks: try ftrace (entry) + kretprobe (exit) first,
 	 * fallback to kprobe+kretprobe. getname_flags always uses kprobe. */
