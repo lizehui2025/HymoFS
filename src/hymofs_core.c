@@ -60,6 +60,7 @@ MODULE_DESCRIPTION("HymoFS LKM");
 #define HYMOFS_VERSION "0.1.0-dev"
 #endif
 MODULE_VERSION(HYMOFS_VERSION);
+MODULE_SOFTDEP("pre: kernelsu");
 
 /*
  * Set to 1 to register VFS kprobes (path/stat/dir hooks). Set to 0 for GET_FD only
@@ -858,11 +859,18 @@ static bool hymo_uid_in_allowlist(uid_t uid)
 
 static bool hymo_should_apply_hide_rules(void)
 {
+	uid_t uid = __kuid_val(current_uid());
+
+	/* Prefer real-time KSU check when available (always up-to-date with allowlist) */
+	if (hymo_ksu_is_allow_uid_ptr)
+		return !hymo_ksu_is_allow_uid_ptr(uid);
+
+	/* Fallback: cached list from ksu_get_allow_list or file */
 	if (!hymo_allowlist_loaded)
 		return true;
 	if (xa_empty(&hymo_allow_uids_xa))
 		return true;
-	return !hymo_uid_in_allowlist(__kuid_val(current_uid()));
+	return !hymo_uid_in_allowlist(uid);
 }
 
 /* Simplified KSU allowlist reload */
@@ -898,6 +906,12 @@ typedef bool (*hymo_ksu_get_allow_list_fn)(int *array, u16 length, u16 *out_leng
 					   u16 *out_total, bool allow);
 static hymo_ksu_get_allow_list_fn hymo_ksu_get_allow_list_ptr;
 
+/* Real-time allowlist check: bool __ksu_is_allow_uid(uid_t) - preferred over cached list */
+typedef bool (*hymo_ksu_is_allow_uid_fn)(uid_t uid);
+static hymo_ksu_is_allow_uid_fn hymo_ksu_is_allow_uid_ptr;
+/* True if ptr was obtained via symbol_get (must symbol_put at exit) */
+static bool hymo_ksu_is_allow_uid_via_symbol_get;
+
 static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 {
 	struct file *fp;
@@ -910,12 +924,31 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 	if (!mutex_trylock(&hymo_config_mutex))
 		return false;
 
-	/* Prefer live KSU allowlist API (new signature with out_length/out_total) when available */
+	/* Resolve __ksu_is_allow_uid: prefer symbol_get (YukiSU export) over kallsyms */
+	if (!hymo_ksu_is_allow_uid_ptr) {
+		void *addr = symbol_get("__ksu_is_allow_uid");
+		if (addr && hymofs_valid_kernel_addr((unsigned long)addr)) {
+			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
+			hymo_ksu_is_allow_uid_via_symbol_get = true;
+		} else if (addr)
+			symbol_put(addr);
+	}
+	if (!hymo_ksu_is_allow_uid_ptr && hymofs_kallsyms_lookup_name) {
+		unsigned long addr = hymofs_kallsyms_lookup_name("__ksu_is_allow_uid");
+		if (addr && hymofs_valid_kernel_addr(addr))
+			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
+	}
 	if (hymofs_kallsyms_lookup_name && !hymo_ksu_get_allow_list_ptr) {
 		unsigned long addr = hymofs_kallsyms_lookup_name("ksu_get_allow_list");
-
 		if (addr && hymofs_valid_kernel_addr(addr))
 			hymo_ksu_get_allow_list_ptr = (hymo_ksu_get_allow_list_fn)addr;
+	}
+	/* When __ksu_is_allow_uid is available, use it for real-time check; skip cached list */
+	if (hymo_ksu_is_allow_uid_ptr) {
+		xa_destroy(&hymo_allow_uids_xa);
+		hymo_allowlist_loaded = true;
+		mutex_unlock(&hymo_config_mutex);
+		return true;
 	}
 	if (hymo_ksu_get_allow_list_ptr) {
 		int *arr = kmalloc(HYMO_ALLOWLIST_UID_MAX * sizeof(int), GFP_KERNEL);
@@ -4200,6 +4233,20 @@ static int __init hymofs_lkm_init(void)
 		pr_warn("HymoFS: d_real_inode not found, statfs f_type passthrough (real lower fs) disabled\n");
 	if (!hymo_filp_open || !hymo_kernel_read)
 		pr_warn("HymoFS: filp_open/kernel_read not found, allowlist disabled\n");
+	/* Resolve __ksu_is_allow_uid: prefer symbol_get (YukiSU export) over kallsyms */
+	{
+		void *addr = symbol_get("__ksu_is_allow_uid");
+		if (addr && hymofs_valid_kernel_addr((unsigned long)addr)) {
+			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
+			hymo_ksu_is_allow_uid_via_symbol_get = true;
+		} else if (addr)
+			symbol_put(addr);
+	}
+	if (!hymo_ksu_is_allow_uid_ptr) {
+		unsigned long addr = hymofs_lookup_name("__ksu_is_allow_uid");
+		if (addr && hymofs_valid_kernel_addr(addr))
+			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
+	}
 	if (!hymo_vfs_getattr || !hymo_dentry_open)
 		pr_warn("HymoFS: vfs_getattr/dentry_open not found, merge whiteout/iterate disabled\n");
 	if (!hymo_d_absolute_path && !hymo_dentry_path_raw)
@@ -4802,6 +4849,11 @@ static void __exit hymofs_lkm_exit(void)
 		rcu_barrier();
 		kfree(old_uname);
 		kfree(old_cmdline);
+	}
+	if (hymo_ksu_is_allow_uid_via_symbol_get && hymo_ksu_is_allow_uid_ptr) {
+		symbol_put(hymo_ksu_is_allow_uid_ptr);
+		hymo_ksu_is_allow_uid_ptr = NULL;
+		hymo_ksu_is_allow_uid_via_symbol_get = false;
 	}
 	if (hymo_filldir_cache)
 		kmem_cache_destroy(hymo_filldir_cache);
