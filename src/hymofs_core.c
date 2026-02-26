@@ -1270,6 +1270,27 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 			written += scnprintf(kbuf + written, buf_size - written,
 					     "hide_xattr_sb %p\n", sb_entry->sb);
 		}
+		/* Feature rules: mount_hide, maps_spoof, statfs_spoof, stealth */
+		if (hymo_feature_enabled_mask & HYMO_FEATURE_MOUNT_HIDE) {
+			if (written < buf_size)
+				written += scnprintf(kbuf + written, buf_size - written,
+						     "mount_hide enabled\n");
+		}
+		if (hymo_feature_enabled_mask & HYMO_FEATURE_MAPS_SPOOF) {
+			if (written < buf_size)
+				written += scnprintf(kbuf + written, buf_size - written,
+						     "maps_spoof enabled\n");
+		}
+		if (hymo_feature_enabled_mask & HYMO_FEATURE_STATFS_SPOOF) {
+			if (written < buf_size)
+				written += scnprintf(kbuf + written, buf_size - written,
+						     "statfs_spoof enabled\n");
+		}
+		if (hymo_stealth_enabled) {
+			if (written < buf_size)
+				written += scnprintf(kbuf + written, buf_size - written,
+						     "stealth enabled\n");
+		}
 		rcu_read_unlock();
 
 		if (copy_to_user(list_arg.buf, kbuf, written)) {
