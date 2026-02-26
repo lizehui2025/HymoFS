@@ -208,7 +208,7 @@ static DEFINE_MUTEX(hymo_maps_mutex);
 
 static bool hymo_allowlist_loaded;
 
-/* Real-time allowlist check: bool __ksu_is_allow_uid(uid_t) - preferred over cached list */
+/* Real-time allowlist: __ksu_is_allow_uid_for_current(uid) handles uid 0 via is_ksu_domain */
 typedef bool (*hymo_ksu_is_allow_uid_fn)(uid_t uid);
 static hymo_ksu_is_allow_uid_fn hymo_ksu_is_allow_uid_ptr;
 
@@ -922,21 +922,31 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 	if (!mutex_trylock(&hymo_config_mutex))
 		return false;
 
-	/* Resolve __ksu_is_allow_uid via kallsyms (YukiSU exports it; GKI may not export symbol_get) */
+	/* Prefer __ksu_is_allow_uid_for_current (handles uid 0 via is_ksu_domain) over __ksu_is_allow_uid */
+	if (!hymo_ksu_is_allow_uid_ptr && hymofs_kallsyms_lookup_name) {
+		unsigned long addr = hymofs_kallsyms_lookup_name("__ksu_is_allow_uid_for_current");
+		if (addr && hymofs_valid_kernel_addr(addr)) {
+			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
+			pr_info("HymoFS: allowlist via __ksu_is_allow_uid_for_current\n");
+		}
+	}
 	if (!hymo_ksu_is_allow_uid_ptr && hymofs_kallsyms_lookup_name) {
 		unsigned long addr = hymofs_kallsyms_lookup_name("__ksu_is_allow_uid");
-		if (addr && hymofs_valid_kernel_addr(addr))
+		if (addr && hymofs_valid_kernel_addr(addr)) {
 			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
+			pr_info("HymoFS: allowlist via __ksu_is_allow_uid (root may not see hidden)\n");
+		}
 	}
 	if (hymofs_kallsyms_lookup_name && !hymo_ksu_get_allow_list_ptr) {
 		unsigned long addr = hymofs_kallsyms_lookup_name("ksu_get_allow_list");
 		if (addr && hymofs_valid_kernel_addr(addr))
 			hymo_ksu_get_allow_list_ptr = (hymo_ksu_get_allow_list_fn)addr;
 	}
-	/* When __ksu_is_allow_uid is available, use it for real-time check; skip cached list */
+	/* When KSU allowlist API available, use it for real-time check; skip cached list */
 	if (hymo_ksu_is_allow_uid_ptr) {
 		xa_destroy(&hymo_allow_uids_xa);
 		hymo_allowlist_loaded = true;
+		pr_info("HymoFS: allowlist ready (KSU real-time check)\n");
 		mutex_unlock(&hymo_config_mutex);
 		return true;
 	}
@@ -952,6 +962,7 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 			if (ok) {
 				xa_destroy(&hymo_allow_uids_xa);
 				hymo_allowlist_loaded = true;
+				pr_info("HymoFS: allowlist ready (ksu_get_allow_list, %u uids)\n", out_len);
 				for (count = 0; count < out_len && count < HYMO_ALLOWLIST_UID_MAX; count++)
 					if (arr[count] > 0)
 						hymo_add_allow_uid((uid_t)arr[count]);
@@ -1001,6 +1012,7 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 		}
 	}
 
+	pr_info("HymoFS: allowlist ready (file, %d uids)\n", count);
 	if (hymo_filp_close)
 		hymo_filp_close(fp, NULL);
 	else
@@ -1009,6 +1021,7 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 	return true;
 
 bad:
+	pr_warn("HymoFS: allowlist load failed (magic/version or read error)\n");
 	if (hymo_filp_close)
 		hymo_filp_close(fp, NULL);
 	else
@@ -4223,11 +4236,20 @@ static int __init hymofs_lkm_init(void)
 		pr_warn("HymoFS: d_real_inode not found, statfs f_type passthrough (real lower fs) disabled\n");
 	if (!hymo_filp_open || !hymo_kernel_read)
 		pr_warn("HymoFS: filp_open/kernel_read not found, allowlist disabled\n");
-	/* Resolve __ksu_is_allow_uid via kallsyms (YukiSU exports it) */
+	/* Prefer __ksu_is_allow_uid_for_current (handles uid 0) over __ksu_is_allow_uid */
 	{
-		unsigned long addr = hymofs_lookup_name("__ksu_is_allow_uid");
-		if (addr && hymofs_valid_kernel_addr(addr))
+		unsigned long addr = hymofs_lookup_name("__ksu_is_allow_uid_for_current");
+		if (addr && hymofs_valid_kernel_addr(addr)) {
 			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
+			pr_info("HymoFS: allowlist via __ksu_is_allow_uid_for_current\n");
+		}
+	}
+	if (!hymo_ksu_is_allow_uid_ptr) {
+		unsigned long addr = hymofs_lookup_name("__ksu_is_allow_uid");
+		if (addr && hymofs_valid_kernel_addr(addr)) {
+			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
+			pr_info("HymoFS: allowlist via __ksu_is_allow_uid (root may not see hidden)\n");
+		}
 	}
 	if (!hymo_vfs_getattr || !hymo_dentry_open)
 		pr_warn("HymoFS: vfs_getattr/dentry_open not found, merge whiteout/iterate disabled\n");
