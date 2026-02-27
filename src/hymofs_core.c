@@ -865,6 +865,10 @@ static bool hymo_should_apply_hide_rules(void)
 {
 	uid_t uid = __kuid_val(current_uid());
 
+	/* uid 0 (root) always sees hidden - bypasses is_ksu_domain edge cases */
+	if (unlikely(uid == 0))
+		return false;
+
 	/* Prefer real-time KSU check when available (always up-to-date with allowlist) */
 	if (hymo_ksu_is_allow_uid_ptr)
 		return !hymo_ksu_is_allow_uid_ptr(uid);
@@ -927,14 +931,12 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 		unsigned long addr = hymofs_kallsyms_lookup_name("__ksu_is_allow_uid_for_current");
 		if (addr && hymofs_valid_kernel_addr(addr)) {
 			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
-			pr_info("HymoFS: allowlist via __ksu_is_allow_uid_for_current\n");
 		}
 	}
 	if (!hymo_ksu_is_allow_uid_ptr && hymofs_kallsyms_lookup_name) {
 		unsigned long addr = hymofs_kallsyms_lookup_name("__ksu_is_allow_uid");
 		if (addr && hymofs_valid_kernel_addr(addr)) {
 			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
-			pr_info("HymoFS: allowlist via __ksu_is_allow_uid (root may not see hidden)\n");
 		}
 	}
 	if (hymofs_kallsyms_lookup_name && !hymo_ksu_get_allow_list_ptr) {
@@ -946,7 +948,6 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 	if (hymo_ksu_is_allow_uid_ptr) {
 		xa_destroy(&hymo_allow_uids_xa);
 		hymo_allowlist_loaded = true;
-		pr_info("HymoFS: allowlist ready (KSU real-time check)\n");
 		mutex_unlock(&hymo_config_mutex);
 		return true;
 	}
@@ -962,7 +963,6 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 			if (ok) {
 				xa_destroy(&hymo_allow_uids_xa);
 				hymo_allowlist_loaded = true;
-				pr_info("HymoFS: allowlist ready (ksu_get_allow_list, %u uids)\n", out_len);
 				for (count = 0; count < out_len && count < HYMO_ALLOWLIST_UID_MAX; count++)
 					if (arr[count] > 0)
 						hymo_add_allow_uid((uid_t)arr[count]);
@@ -1012,7 +1012,6 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 		}
 	}
 
-	pr_info("HymoFS: allowlist ready (file, %d uids)\n", count);
 	if (hymo_filp_close)
 		hymo_filp_close(fp, NULL);
 	else
@@ -2916,7 +2915,7 @@ static int hymo_statfs_entry(struct kretprobe_instance *ri, struct pt_regs *regs
 #endif
 	d->spoof_f_type = 0;
 	if (!(hymo_feature_enabled_mask & HYMO_FEATURE_STATFS_SPOOF) ||
-	    !pathname || !hymo_kern_path || !hymo_d_real_inode)
+	    !pathname || !hymo_kern_path)
 		return 0;
 	{
 		char path_buf[HYMO_MAX_LEN_PATHNAME];
@@ -3068,8 +3067,10 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 	 * duplicates: the injected version (from populate_injected_list)
 	 * replaces the original, just like original hymofs.c does.
 	 * Skip when merge target IS the dir we're listing (e.g. target path
-	 * resolved to same inode via symlink) - otherwise we'd hide everything. */
-	if (hymo_d_hash_and_lookup && w->merge_target_count > 0 && w->parent_dentry) {
+	 * resolved to same inode via symlink) - otherwise we'd hide everything.
+	 * Must respect allowlist: privileged/allowlist processes see real files. */
+	if (hymo_d_hash_and_lookup && w->merge_target_count > 0 && w->parent_dentry &&
+	    !hymo_is_privileged_process() && hymo_should_apply_hide_rules()) {
 		int i;
 		for (i = 0; i < w->merge_target_count; i++) {
 			struct dentry *tgt = w->merge_target_dentries[i];
@@ -3099,9 +3100,6 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 			if (cinode && cinode->i_mapping &&
 			    test_bit(AS_FLAGS_HYMO_HIDE,
 				     &cinode->i_mapping->flags)) {
-				hymo_log("filldir HIDE: %.*s (ino=%lu)\n",
-					 namlen, name,
-					 cinode->i_ino);
 				dput(child);
 				return HYMO_FILLDIR_CONTINUE;
 			}
@@ -4241,14 +4239,12 @@ static int __init hymofs_lkm_init(void)
 		unsigned long addr = hymofs_lookup_name("__ksu_is_allow_uid_for_current");
 		if (addr && hymofs_valid_kernel_addr(addr)) {
 			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
-			pr_info("HymoFS: allowlist via __ksu_is_allow_uid_for_current\n");
 		}
 	}
 	if (!hymo_ksu_is_allow_uid_ptr) {
 		unsigned long addr = hymofs_lookup_name("__ksu_is_allow_uid");
 		if (addr && hymofs_valid_kernel_addr(addr)) {
 			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
-			pr_info("HymoFS: allowlist via __ksu_is_allow_uid (root may not see hidden)\n");
 		}
 	}
 	if (!hymo_vfs_getattr || !hymo_dentry_open)
