@@ -250,4 +250,8 @@ void hymofs_handle_sys_exit_getfd(struct pt_regs *regs, long ret);
 /* Symbol lookup (resolved via kprobe, no kernel export needed) */
 unsigned long hymofs_lookup_name(const char *name);
 
+/* iterate_dir filldir filter (used by hymofs_ftrace.c to detect wrapper) */
+extern HYMO_FILLDIR_RET_TYPE hymofs_filldir_filter(struct dir_context *ctx,
+	const char *name, int namlen, loff_t offset, u64 ino, unsigned int d_type);
+
 #endif /* _HYMOFS_LKM_H */

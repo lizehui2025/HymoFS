@@ -16,6 +16,9 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/kallsyms.h>
+#ifndef arch_ftrace_get_regs
+#define arch_ftrace_get_regs(fregs) (NULL)
+#endif
 #include <linux/kprobes.h>
 #include <linux/errno.h>
 #include <linux/string.h>
@@ -295,8 +298,21 @@ static char *(*hymo_d_absolute_path)(const struct path *, char *, int);
 static char *(*hymo_dentry_path_raw)(const struct dentry *, char *, int);
 static char *(*hymo_d_path)(const struct path *, char *, int);
 static struct dentry *(*hymo_d_hash_and_lookup)(struct dentry *, const struct qstr *);
-/* d_real_inode: get real (e.g. lower) inode for overlay; used for statfs f_type passthrough */
-static struct inode *(*hymo_d_real_inode)(struct dentry *);
+/* d_real_inode: get real (e.g. lower) inode for overlay; used for statfs f_type passthrough.
+ * d_real_inode is static inline in kernel, not in kallsyms. Use d_op->d_real when DCACHE_OP_REAL. */
+#ifndef D_REAL_DATA
+#define D_REAL_DATA 0
+#endif
+static struct inode *hymo_d_real_inode_impl(struct dentry *dentry)
+{
+	struct dentry *real;
+
+	if (unlikely(dentry->d_flags & DCACHE_OP_REAL) && dentry->d_op && dentry->d_op->d_real) {
+		real = dentry->d_op->d_real(dentry, D_REAL_DATA);
+		return real && real->d_inode ? real->d_inode : dentry->d_inode;
+	}
+	return dentry->d_inode;
+}
 /* path_put, dput, dget, iput, iterate_dir: use kernel exports directly (EXPORT_SYMBOL), no lookup */
 
 /* vfs_getxattr addr for resolving source path's SELinux context (set when xattr kretprobe registered) */
@@ -3035,11 +3051,10 @@ static int hymo_statfs_entry(struct kretprobe_instance *ri, struct pt_regs *regs
 		if (hymo_kern_path(path_buf, 0, &p) != 0)
 			return 0;
 		if ((unsigned long)p.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC) {
-			real_ino = hymo_d_real_inode ? hymo_d_real_inode(p.dentry) : NULL;
+			real_ino = hymo_d_real_inode_impl(p.dentry);
 			if (real_ino && real_ino->i_sb != p.dentry->d_sb)
 				d->spoof_f_type = (unsigned long)real_ino->i_sb->s_magic;
 			else
-				/* Fallback when d_real_inode missing (e.g. older kernel): use EROFS to match typical resolved type */
 				d->spoof_f_type = (unsigned long)EROFS_SUPER_MAGIC;
 		}
 		path_put(&p);
@@ -3116,7 +3131,7 @@ static struct kretprobe hymo_krp_cmdline_read = {
  * iterate_dir: filldir filter (runs in fs callback context, not kprobe)
  * ====================================================================== */
 
-static HYMO_NOCFI HYMO_FILLDIR_RET_TYPE
+HYMO_NOCFI HYMO_FILLDIR_RET_TYPE
 hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 		      int namlen, loff_t offset, u64 ino, unsigned int d_type)
 {
@@ -4333,9 +4348,7 @@ static int __init hymofs_lkm_init(void)
 		pr_warn("HymoFS: d_path not found, path resolution in populate/merge/hide may fail\n");
 	if (!hymo_d_hash_and_lookup)
 		pr_warn("HymoFS: d_hash_and_lookup not found, merge dedup and hide filter disabled\n");
-	hymo_d_real_inode = (void *)hymofs_lookup_name("d_real_inode");
-	if (!hymo_d_real_inode)
-		pr_warn("HymoFS: d_real_inode not found, statfs f_type passthrough (real lower fs) disabled\n");
+	/* d_real_inode is inline in kernel; we use hymo_d_real_inode_impl via d_op->d_real */
 	if (!hymo_filp_open || !hymo_kernel_read)
 		pr_warn("HymoFS: filp_open/kernel_read not found, allowlist disabled\n");
 	/* Prefer __ksu_is_allow_uid_for_current (handles uid 0) over __ksu_is_allow_uid */
@@ -4700,16 +4713,16 @@ static int __init hymofs_lkm_init(void)
 #if HYMOFS_VFS_KPROBES
 	if (!hymo_skip_vfs_param) {
 	/* Install VFS hooks: try ftrace (entry) + kretprobe (exit) first,
-	 * fallback to kprobe+kretprobe. getname_flags always uses kprobe. */
+	 * fallback to kprobe+kretprobe only if ftrace unavailable. getname_flags uses kprobe. */
 	{
 		size_t i;
 		int ret;
 		size_t start_idx = (hymofs_tracepoint_path_registered() ? 1 : 0);
 
-#ifdef CONFIG_DYNAMIC_FTRACE
 		{
 			unsigned long ft_addr[4];
 
+			pr_info("HymoFS: trying ftrace for VFS entry (preferred over kprobes)\n");
 			ret = hymofs_ftrace_try_register(ft_addr);
 			if (ret == 0) {
 				hymo_vfs_getxattr_addr = (void *)ft_addr[3];
@@ -4756,10 +4769,9 @@ static int __init hymofs_lkm_init(void)
 					unregister_kretprobe(&hymo_krp_vfs_getxattr);
 				}
 			} else {
-				pr_warn("HymoFS: ftrace registration failed: %d, falling back to kprobes\n", ret);
+				pr_info("HymoFS: ftrace unavailable (err=%d), using kprobes\n", ret);
 			}
 		}
-#endif
 
 		/* getname_flags: always kprobe (needs skip-original) */
 		if (start_idx == 0) {
@@ -4956,30 +4968,27 @@ static void __exit hymofs_lkm_exit(void)
 #if HYMOFS_VFS_KPROBES
 	hymofs_tracepoint_path_exit();
 	if (!hymo_skip_vfs_param) {
-#ifdef CONFIG_DYNAMIC_FTRACE
-	if (hymo_vfs_use_ftrace) {
-		hymofs_ftrace_unregister();
-		if (hymo_getxattr_kprobe_registered)
-			unregister_kretprobe(&hymo_krp_vfs_getxattr);
-		unregister_kretprobe(&hymo_krp_iterate_dir);
-		unregister_kretprobe(&hymo_krp_d_path);
-		unregister_kretprobe(&hymo_krp_vfs_getattr);
-		if (hymo_getname_kprobe_registered)
-			unregister_kprobe(&hymofs_kprobes[0]);
-	} else
-#endif
-	{
-		if (hymo_getxattr_kprobe_registered)
-			unregister_kretprobe(&hymo_krp_vfs_getxattr);
-		unregister_kretprobe(&hymo_krp_iterate_dir);
-		unregister_kretprobe(&hymo_krp_d_path);
-		unregister_kretprobe(&hymo_krp_vfs_getattr);
-		{
-			size_t i, start = hymofs_tracepoint_path_registered() ? 1 : 0;
-			for (i = start; i < HYMOFS_VFS_HOOK_COUNT; i++)
-				unregister_kprobe(&hymofs_kprobes[i]);
+		if (hymo_vfs_use_ftrace) {
+			hymofs_ftrace_unregister();
+			if (hymo_getxattr_kprobe_registered)
+				unregister_kretprobe(&hymo_krp_vfs_getxattr);
+			unregister_kretprobe(&hymo_krp_iterate_dir);
+			unregister_kretprobe(&hymo_krp_d_path);
+			unregister_kretprobe(&hymo_krp_vfs_getattr);
+			if (hymo_getname_kprobe_registered)
+				unregister_kprobe(&hymofs_kprobes[0]);
+		} else {
+			if (hymo_getxattr_kprobe_registered)
+				unregister_kretprobe(&hymo_krp_vfs_getxattr);
+			unregister_kretprobe(&hymo_krp_iterate_dir);
+			unregister_kretprobe(&hymo_krp_d_path);
+			unregister_kretprobe(&hymo_krp_vfs_getattr);
+			{
+				size_t i, start = hymofs_tracepoint_path_registered() ? 1 : 0;
+				for (i = start; i < HYMOFS_VFS_HOOK_COUNT; i++)
+					unregister_kprobe(&hymofs_kprobes[i]);
+			}
 		}
-	}
 	}
 #endif
 
