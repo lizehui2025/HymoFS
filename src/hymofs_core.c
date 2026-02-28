@@ -247,6 +247,7 @@ static int hymo_getxattr_kprobe_registered;
 static int hymo_mount_hide_vfsmnt_registered;
 static int hymo_mount_hide_mountinfo_registered;
 static int hymo_mount_hide_read_fallback_registered;
+static int hymo_maps_seq_read_registered;
 
 /* Per-feature enable mask: 1 = enabled. Default all enabled. */
 static int hymo_feature_enabled_mask = 0xFFFFFFFF;
@@ -1521,7 +1522,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		if (hymo_mount_hide_vfsmnt_registered || hymo_mount_hide_mountinfo_registered ||
 		    hymo_mount_hide_read_fallback_registered)
 			features |= HYMO_FEATURE_MOUNT_HIDE;
-		if (hymo_mount_hide_read_fallback_registered)
+		if (hymo_mount_hide_read_fallback_registered || hymo_maps_seq_read_registered)
 			features |= HYMO_FEATURE_MAPS_SPOOF;
 		if (hymo_statfs_kretprobe_registered)
 			features |= HYMO_FEATURE_STATFS_SPOOF;
@@ -1612,10 +1613,13 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 			n = scnprintf(kbuf + written, buf_size - written, "mountinfo/mounts: none\n");
 		written += n;
 
-		/* maps spoof (same read kretprobe as mount hide) */
+		/* maps spoof (read kretprobe or seq_read fallback) */
 		if (hymo_mount_hide_read_fallback_registered)
 			n = scnprintf(kbuf + written, buf_size - written,
 				     "maps: kretprobe (read buffer filter)\n");
+		else if (hymo_maps_seq_read_registered)
+			n = scnprintf(kbuf + written, buf_size - written,
+				     "maps: kretprobe (seq_read fallback)\n");
 		else
 			n = scnprintf(kbuf + written, buf_size - written, "maps: none\n");
 		written += n;
@@ -2810,6 +2814,10 @@ static int hymo_read_mount_filter_ret(struct kretprobe_instance *ri, struct pt_r
 	char *path_buf;
 	size_t new_len;
 
+	/* Fast path: skip when both mount_hide and maps_spoof are disabled */
+	if (!(hymo_feature_enabled_mask & (HYMO_FEATURE_MOUNT_HIDE | HYMO_FEATURE_MAPS_SPOOF)))
+		return 0;
+
 #if defined(__aarch64__)
 	ret = (long)regs->regs[0];
 #elif defined(__x86_64__)
@@ -2887,6 +2895,96 @@ static struct kretprobe hymo_krp_read_mount_filter = {
 	.entry_handler = hymo_read_mount_filter_entry,
 	.handler = hymo_read_mount_filter_ret,
 	.data_size = sizeof(struct hymo_read_mount_ri_data),
+	.maxactive = 64,
+};
+
+/* Maps spoof fallback when read syscall path unavailable: kretprobe on seq_read.
+ * seq_read(file,buf,size,ppos) is used by /proc/pid/maps. Filter only maps/smaps paths. */
+static char *hymo_maps_spoof_buf;
+static DEFINE_MUTEX(hymo_maps_spoof_mutex);
+
+struct hymo_seq_read_ri_data {
+	struct file *file;
+	void __user *buf;
+	size_t size;
+};
+
+static int hymo_seq_read_maps_filter_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct hymo_seq_read_ri_data *d = (struct hymo_seq_read_ri_data *)ri->data;
+#if defined(__aarch64__)
+	d->file = (struct file *)regs->regs[0];
+	d->buf = (void __user *)regs->regs[1];
+	d->size = (size_t)regs->regs[2];
+#elif defined(__x86_64__)
+	d->file = (struct file *)regs->di;
+	d->buf = (void __user *)regs->si;
+	d->size = (size_t)regs->dx;
+#else
+	d->file = NULL;
+	d->buf = NULL;
+	d->size = 0;
+#endif
+	return 0;
+}
+
+static int hymo_seq_read_maps_filter_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	long ret;
+	struct hymo_seq_read_ri_data *d = (struct hymo_seq_read_ri_data *)ri->data;
+	char *path_buf;
+	size_t new_len;
+
+	if (!(hymo_feature_enabled_mask & HYMO_FEATURE_MAPS_SPOOF))
+		return 0;
+	if (!d->file || !d->buf || !hymo_maps_spoof_buf || !hymo_d_path)
+		return 0;
+
+#if defined(__aarch64__)
+	ret = (long)regs->regs[0];
+#elif defined(__x86_64__)
+	ret = (long)regs->ax;
+#else
+	return 0;
+#endif
+	if (ret <= 0 || ret > HYMO_READ_MOUNT_FILTER_BUF)
+		return 0;
+
+	path_buf = (char *)__get_free_page(GFP_KERNEL);
+	if (!path_buf)
+		return 0;
+	path_buf[0] = '\0';
+	hymo_d_path(&d->file->f_path, path_buf, PAGE_SIZE);
+	if (path_buf[0] != '/' || strncmp(path_buf, "/proc/", 6) != 0 ||
+	    (!strstr(path_buf, "/maps") && !strstr(path_buf, "/smaps"))) {
+		free_page((unsigned long)path_buf);
+		return 0;
+	}
+	free_page((unsigned long)path_buf);
+
+	mutex_lock(&hymo_maps_spoof_mutex);
+	if (copy_from_user(hymo_maps_spoof_buf, d->buf, (size_t)ret)) {
+		mutex_unlock(&hymo_maps_spoof_mutex);
+		return 0;
+	}
+	new_len = hymo_filter_maps_lines(hymo_maps_spoof_buf, (size_t)ret);
+	if (new_len != (size_t)ret) {
+		if (copy_to_user(d->buf, hymo_maps_spoof_buf, new_len) == 0) {
+#if defined(__aarch64__)
+			regs->regs[0] = (unsigned long)new_len;
+#elif defined(__x86_64__)
+			regs->ax = (unsigned long)new_len;
+#endif
+		}
+	}
+	mutex_unlock(&hymo_maps_spoof_mutex);
+	return 0;
+}
+
+static struct kretprobe hymo_krp_seq_read_maps = {
+	.entry_handler = hymo_seq_read_maps_filter_entry,
+	.handler = hymo_seq_read_maps_filter_ret,
+	.data_size = sizeof(struct hymo_seq_read_ri_data),
 	.maxactive = 64,
 };
 
@@ -4387,11 +4485,13 @@ static int __init hymofs_lkm_init(void)
 	if (!hymo_skip_extra_kprobes_param) {
 		static const char *uname_symbols[] = {
 #if defined(__aarch64__)
-			"__arm64_sys_newuname", "sys_newuname", NULL
+			"__arm64_sys_newuname", "sys_newuname", "SyS_newuname", "uname", NULL
 #elif defined(__x86_64__)
-			"__x64_sys_newuname", "sys_newuname", NULL
+			"__x64_sys_newuname", "sys_newuname", "SyS_newuname", "uname", NULL
+#elif defined(__arm__)
+			"__arm_sys_newuname", "sys_newuname", "SyS_newuname", "uname", NULL
 #else
-			NULL
+			"sys_newuname", "SyS_newuname", "uname", NULL
 #endif
 		};
 		void *uname_addr = NULL;
@@ -4459,11 +4559,13 @@ static int __init hymofs_lkm_init(void)
 	{
 		static const char *read_syms[] = {
 #if defined(__aarch64__)
-			"__arm64_sys_read", "sys_read", NULL
+			"__arm64_sys_read", "sys_read", "SyS_read", NULL
 #elif defined(__x86_64__)
-			"__x64_sys_read", "sys_read", NULL
+			"__x64_sys_read", "sys_read", "SyS_read", NULL
+#elif defined(__arm__)
+			"__arm_sys_read", "sys_read", "SyS_read", NULL
 #else
-			NULL
+			"sys_read", "SyS_read", NULL
 #endif
 		};
 		unsigned long read_addr = 0;
@@ -4515,17 +4617,38 @@ static int __init hymofs_lkm_init(void)
 			} else {
 				pr_warn("HymoFS: show_mountinfo not found\n");
 			}
+			/* Maps spoof fallback: seq_read used by /proc/pid/maps when read path unavailable */
+			{
+				unsigned long seq_read_addr = hymofs_lookup_name("seq_read");
+				if (seq_read_addr) {
+					hymo_maps_spoof_buf = vmalloc(HYMO_READ_MOUNT_FILTER_BUF);
+					if (hymo_maps_spoof_buf) {
+						hymo_krp_seq_read_maps.kp.addr = (kprobe_opcode_t *)seq_read_addr;
+						if (register_kretprobe(&hymo_krp_seq_read_maps) == 0) {
+							hymo_maps_seq_read_registered = 1;
+							pr_info("HymoFS: maps spoof via kretprobe on seq_read (fallback)\n");
+						} else {
+							vfree(hymo_maps_spoof_buf);
+							hymo_maps_spoof_buf = NULL;
+						}
+					}
+				} else {
+					pr_warn("HymoFS: seq_read not found, maps spoof disabled when read path unavailable\n");
+				}
+			}
 		}
 		/* statfs f_type spoof: always try to register (independent of mount hide path).
 		 * Makes direct statfs(path) match resolved f_type to avoid INCONSISTENT_MOUNT detection. */
 		if (!hymo_statfs_kretprobe_registered) {
 			static const char *statfs_syms[] = {
 #if defined(__aarch64__)
-				"__arm64_sys_statfs", "sys_statfs", NULL
+				"__arm64_sys_statfs", "sys_statfs", "SyS_statfs", NULL
 #elif defined(__x86_64__)
-				"__x64_sys_statfs", "sys_statfs", NULL
+				"__x64_sys_statfs", "sys_statfs", "SyS_statfs", NULL
+#elif defined(__arm__)
+				"__arm_sys_statfs", "sys_statfs", "SyS_statfs", NULL
 #else
-				NULL
+				"sys_statfs", "SyS_statfs", NULL
 #endif
 			};
 			unsigned long statfs_addr = 0;
@@ -4768,17 +4891,24 @@ static void __exit hymofs_lkm_exit(void)
 			vfree(hymo_read_filter_buf);
 			hymo_read_filter_buf = NULL;
 		}
-		/* Clear maps spoof rules */
-		{
-			struct hymo_maps_rule_entry *e, *tmp;
-
-			mutex_lock(&hymo_maps_mutex);
-			list_for_each_entry_safe(e, tmp, &hymo_maps_rules, list) {
-				list_del(&e->list);
-				kfree(e);
-			}
-			mutex_unlock(&hymo_maps_mutex);
+	}
+	if (hymo_maps_seq_read_registered) {
+		unregister_kretprobe(&hymo_krp_seq_read_maps);
+		if (hymo_maps_spoof_buf) {
+			vfree(hymo_maps_spoof_buf);
+			hymo_maps_spoof_buf = NULL;
 		}
+	}
+	/* Clear maps spoof rules (shared by read and seq_read paths) */
+	if (hymo_mount_hide_read_fallback_registered || hymo_maps_seq_read_registered) {
+		struct hymo_maps_rule_entry *e, *tmp;
+
+		mutex_lock(&hymo_maps_mutex);
+		list_for_each_entry_safe(e, tmp, &hymo_maps_rules, list) {
+			list_del(&e->list);
+			kfree(e);
+		}
+		mutex_unlock(&hymo_maps_mutex);
 	}
 	if (hymo_mount_hide_mountinfo_registered)
 		unregister_kprobe(&hymo_kp_show_mountinfo);
