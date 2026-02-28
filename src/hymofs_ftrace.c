@@ -91,9 +91,13 @@ extern int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *regs);
 
 
 static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+				struct ftrace_ops *op, struct pt_regs *regs)
+#else
 				struct ftrace_ops *op, struct ftrace_regs *fregs)
+#endif
 {
-	struct pt_regs *regs;
+	struct pt_regs *regs_local;
 	struct hymo_ftrace_percpu *pcpu;
 	struct hymo_ftrace_slot *slot;
 	int depth, type = -1;
@@ -102,13 +106,19 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 	(void)parent_ip;
 	(void)op;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 	/* Defensive: verify fregs is valid */
 	if (!fregs)
 		return;
 
-	regs = ftrace_get_regs(fregs);
-	if (!regs)
+	regs_local = ftrace_get_regs(fregs);
+	if (!regs_local)
 		return;
+#else
+	regs_local = regs;
+	if (!regs_local)
+		return;
+#endif
 
 	/* Check if any ftrace addresses are registered */
 	if (!hymo_ft_addr[0] && !hymo_ft_addr[1] && !hymo_ft_addr[2] && !hymo_ft_addr[3])
@@ -142,17 +152,17 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 	if (type == 0) {
 		struct kretprobe_instance ri;
 		HYMO_RI_WITH_DATA(ri, &slot->u.getattr);
-		if (hymo_krp_vfs_getattr_entry(&ri, regs) != 0)
+		if (hymo_krp_vfs_getattr_entry(&ri, regs_local) != 0)
 			slot->type = -1;
 	} else if (type == 1) {
 		struct kretprobe_instance ri;
 		HYMO_RI_WITH_DATA(ri, &slot->u.dpath);
-		if (hymo_krp_d_path_entry(&ri, regs) != 0)
+		if (hymo_krp_d_path_entry(&ri, regs_local) != 0)
 			slot->type = -1;
 	} else if (type == 2) {
 		struct dir_context *ictx;
-		hymo_kp_iterate_dir_pre(&kp_dummy, regs);
-		ictx = (struct dir_context *)regs->regs[1];
+		hymo_kp_iterate_dir_pre(&kp_dummy, regs_local);
+		ictx = (struct dir_context *)regs_local->regs[1];
 		if (ictx && ictx->actor == hymofs_filldir_filter) {
 			slot->u.iter.did_swap = 1;
 			slot->u.iter.wrapper = container_of(ictx,
@@ -164,7 +174,7 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 	} else if (type == 3) {
 		struct kretprobe_instance ri;
 		HYMO_RI_WITH_DATA(ri, &slot->u.getxattr);
-		if (hymo_krp_vfs_getxattr_entry(&ri, regs) != 0)
+		if (hymo_krp_vfs_getxattr_entry(&ri, regs_local) != 0)
 			slot->type = -1;
 	}
 }
