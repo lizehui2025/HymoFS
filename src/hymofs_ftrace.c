@@ -73,11 +73,25 @@ static symbol_get_fn hymo_symbol_get;
 static symbol_put_fn hymo_symbol_put;
 static bool hymo_ftrace_used_symbol_get; /* true = need symbol_put on unregister */
 
-/* C99: flexible array member cannot use designated init; store ptr at data offset */
-#define HYMO_RI_WITH_DATA(ri, ptr) do { \
-	memset(&(ri), 0, sizeof(ri)); \
-	*(void **)((char *)&(ri) + offsetof(struct kretprobe_instance, data)) = (void *)(ptr); \
-} while (0)
+/*
+ * Build a stack-local kretprobe_instance view for reusing existing handlers
+ * from the ftrace path without writing past object bounds.
+ */
+#define HYMO_FAKE_RI_DATA_OFF offsetof(struct kretprobe_instance, data)
+#define HYMO_FAKE_RI_SIZE \
+	((sizeof(struct kretprobe_instance) > \
+	  (HYMO_FAKE_RI_DATA_OFF + sizeof(void *))) ? \
+	 sizeof(struct kretprobe_instance) : \
+	 (HYMO_FAKE_RI_DATA_OFF + sizeof(void *)))
+
+static inline struct kretprobe_instance *hymo_fake_ri_init(unsigned char *buf, void *ptr)
+{
+	struct kretprobe_instance *ri = (struct kretprobe_instance *)buf;
+
+	memset(buf, 0, HYMO_FAKE_RI_SIZE);
+	memcpy((char *)ri + HYMO_FAKE_RI_DATA_OFF, &ptr, sizeof(ptr));
+	return ri;
+}
 
 /* Forward declarations: handlers implemented in hymofs_core.c */
 extern int hymo_krp_vfs_getattr_entry(struct kretprobe_instance *ri, struct pt_regs *regs);
@@ -150,14 +164,16 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 	slot->type = type;
 
 	if (type == 0) {
-		struct kretprobe_instance ri;
-		HYMO_RI_WITH_DATA(ri, &slot->u.getattr);
-		if (hymo_krp_vfs_getattr_entry(&ri, regs_local) != 0)
+		unsigned char ri_buf[HYMO_FAKE_RI_SIZE];
+		struct kretprobe_instance *ri = hymo_fake_ri_init(ri_buf, &slot->u.getattr);
+
+		if (hymo_krp_vfs_getattr_entry(ri, regs_local) != 0)
 			slot->type = -1;
 	} else if (type == 1) {
-		struct kretprobe_instance ri;
-		HYMO_RI_WITH_DATA(ri, &slot->u.dpath);
-		if (hymo_krp_d_path_entry(&ri, regs_local) != 0)
+		unsigned char ri_buf[HYMO_FAKE_RI_SIZE];
+		struct kretprobe_instance *ri = hymo_fake_ri_init(ri_buf, &slot->u.dpath);
+
+		if (hymo_krp_d_path_entry(ri, regs_local) != 0)
 			slot->type = -1;
 	} else if (type == 2) {
 		struct dir_context *ictx;
@@ -172,9 +188,10 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 			slot->u.iter.wrapper = NULL;
 		}
 	} else if (type == 3) {
-		struct kretprobe_instance ri;
-		HYMO_RI_WITH_DATA(ri, &slot->u.getxattr);
-		if (hymo_krp_vfs_getxattr_entry(&ri, regs_local) != 0)
+		unsigned char ri_buf[HYMO_FAKE_RI_SIZE];
+		struct kretprobe_instance *ri = hymo_fake_ri_init(ri_buf, &slot->u.getxattr);
+
+		if (hymo_krp_vfs_getxattr_entry(ri, regs_local) != 0)
 			slot->type = -1;
 	}
 }
@@ -205,21 +222,25 @@ int hymo_ftrace_krp_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 		return 0;
 	if (slot->type >= 0) {
 		if (slot->type == 0) {
-			struct kretprobe_instance r;
-			HYMO_RI_WITH_DATA(r, &slot->u.getattr);
-			hymo_krp_vfs_getattr_ret(&r, regs);
+			unsigned char ri_buf[HYMO_FAKE_RI_SIZE];
+			struct kretprobe_instance *r = hymo_fake_ri_init(ri_buf, &slot->u.getattr);
+
+			hymo_krp_vfs_getattr_ret(r, regs);
 		} else if (slot->type == 1) {
-			struct kretprobe_instance r;
-			HYMO_RI_WITH_DATA(r, &slot->u.dpath);
-			hymo_krp_d_path_ret(&r, regs);
+			unsigned char ri_buf[HYMO_FAKE_RI_SIZE];
+			struct kretprobe_instance *r = hymo_fake_ri_init(ri_buf, &slot->u.dpath);
+
+			hymo_krp_d_path_ret(r, regs);
 		} else if (slot->type == 2) {
-			struct kretprobe_instance r;
-			HYMO_RI_WITH_DATA(r, &slot->u.iter);
-			hymo_krp_iterate_dir_ret(&r, regs);
+			unsigned char ri_buf[HYMO_FAKE_RI_SIZE];
+			struct kretprobe_instance *r = hymo_fake_ri_init(ri_buf, &slot->u.iter);
+
+			hymo_krp_iterate_dir_ret(r, regs);
 		} else if (slot->type == 3) {
-			struct kretprobe_instance r;
-			HYMO_RI_WITH_DATA(r, &slot->u.getxattr);
-			hymo_krp_vfs_getxattr_ret(&r, regs);
+			unsigned char ri_buf[HYMO_FAKE_RI_SIZE];
+			struct kretprobe_instance *r = hymo_fake_ri_init(ri_buf, &slot->u.getxattr);
+
+			hymo_krp_vfs_getxattr_ret(r, regs);
 		}
 	}
 	pcpu = hymo_ftrace_this_cpu();
@@ -320,13 +341,30 @@ int hymofs_ftrace_try_register(unsigned long addr[4])
 		hymo_ftrace_base = NULL;
 		goto err_put;
 	}
-	ret = hymo_ftrace_filter_fn(&hymo_ftrace_ops, hymo_ft_addr, 4, 0, 0);
-	if (ret != 0) {
-		pr_warn("HymoFS: ftrace_set_filter_ips failed: %d\n", ret);
-		hymo_ftrace_unregister_fn(&hymo_ftrace_ops);
-		vfree(hymo_ftrace_base);
-		hymo_ftrace_base = NULL;
-		goto err_put;
+	{
+		unsigned long filter_ips[4];
+		unsigned int filter_cnt = 0;
+
+		for (i = 0; i < 4; i++) {
+			if (hymo_ft_addr[i])
+				filter_ips[filter_cnt++] = hymo_ft_addr[i];
+		}
+		if (filter_cnt == 0) {
+			pr_warn("HymoFS: no valid ftrace symbol addresses\n");
+			ret = -ENOENT;
+			hymo_ftrace_unregister_fn(&hymo_ftrace_ops);
+			vfree(hymo_ftrace_base);
+			hymo_ftrace_base = NULL;
+			goto err_put;
+		}
+		ret = hymo_ftrace_filter_fn(&hymo_ftrace_ops, filter_ips, filter_cnt, 0, 0);
+		if (ret != 0) {
+			pr_warn("HymoFS: ftrace_set_filter_ips failed: %d\n", ret);
+			hymo_ftrace_unregister_fn(&hymo_ftrace_ops);
+			vfree(hymo_ftrace_base);
+			hymo_ftrace_base = NULL;
+			goto err_put;
+		}
 	}
 	return 0;
 
