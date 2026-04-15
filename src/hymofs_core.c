@@ -794,6 +794,98 @@ static void hymofs_add_path_entry(const char *src, const char *tgt,
 	}
 }
 
+/* Register a nested merge_entry from within materialize (process context).
+ * Mirrors the ADD_MERGE_RULE ioctl's entry construction. Returns true when
+ * a new entry was inserted. Does not take ownership of src_str/target_str.
+ *
+ * Used so that DT_DIR children discovered while materializing a parent merge
+ * become their own merge rules, instead of being registered as DT_DIR
+ * entries in hymo_paths. The latter would cause getname_flags to
+ * wholesale-redirect any lookup of that subdir to the module's (typically
+ * incomplete) copy, destroying real subdir content. A nested merge rule, by
+ * contrast, keeps the real subdir intact and only performs iterate_dir-time
+ * injection of the module's contents on top.
+ */
+static bool hymofs_register_nested_merge(const char *src_str,
+					 const char *target_str)
+{
+	struct hymo_merge_entry *me, *existing;
+	char *resolved_src = NULL;
+	struct dentry *tgt_dentry = NULL;
+	struct path mpath;
+	u32 hash;
+	bool created = false;
+
+	if (!src_str || !target_str)
+		return false;
+	if (!hymo_kern_path)
+		return false;
+
+	if (hymo_kern_path(src_str, LOOKUP_FOLLOW, &mpath) == 0) {
+		char *rbuf = kmalloc(PATH_MAX, GFP_KERNEL);
+		if (rbuf && hymo_d_path) {
+			char *res = hymo_d_path(&mpath, rbuf, PATH_MAX);
+			if (!IS_ERR(res) && res[0] == '/' &&
+			    strcmp(res, src_str) != 0)
+				resolved_src = kstrdup(res, GFP_KERNEL);
+		}
+		kfree(rbuf);
+		path_put(&mpath);
+	}
+	if (hymo_kern_path(target_str, LOOKUP_FOLLOW, &mpath) == 0) {
+		tgt_dentry = dget(mpath.dentry);
+		path_put(&mpath);
+	}
+
+	hash = full_name_hash(NULL, src_str, strlen(src_str));
+	mutex_lock(&hymo_config_mutex);
+	hlist_for_each_entry(existing,
+		&hymo_merge_dirs[hash_min(hash, HYMO_HASH_BITS)], node) {
+		if (strcmp(existing->src, src_str) == 0 &&
+		    strcmp(existing->target, target_str) == 0) {
+			mutex_unlock(&hymo_config_mutex);
+			kfree(resolved_src);
+			if (tgt_dentry)
+				dput(tgt_dentry);
+			return false;
+		}
+	}
+	me = kmalloc(sizeof(*me), GFP_KERNEL);
+	if (me) {
+		me->src = kstrdup(src_str, GFP_KERNEL);
+		me->target = kstrdup(target_str, GFP_KERNEL);
+		me->resolved_src = resolved_src;
+		me->target_dentry = tgt_dentry;
+		if (me->src && me->target) {
+			hlist_add_head_rcu(&me->node,
+				&hymo_merge_dirs[hash_min(hash, HYMO_HASH_BITS)]);
+			resolved_src = NULL;
+			tgt_dentry = NULL;
+			created = true;
+		} else {
+			kfree(me->src);
+			kfree(me->target);
+			kfree(me);
+		}
+	}
+	mutex_unlock(&hymo_config_mutex);
+
+	if (created) {
+		hymofs_add_inject_rule(kstrdup(src_str, GFP_KERNEL));
+		if (me->resolved_src)
+			hymofs_add_inject_rule(kstrdup(me->resolved_src,
+						       GFP_KERNEL));
+		hymofs_mark_dir_has_inject(src_str);
+		if (me->resolved_src)
+			hymofs_mark_dir_has_inject(me->resolved_src);
+	}
+
+	kfree(resolved_src);
+	if (tgt_dentry)
+		dput(tgt_dentry);
+	return created;
+}
+
 struct hymo_mat_ctx {
 	struct dir_context ctx;
 	const char *src_prefix;
@@ -825,15 +917,32 @@ hymo_mat_filldir(struct dir_context *ctx, const char *name,
 		return HYMO_FILLDIR_CONTINUE;
 	}
 
-	hymofs_add_path_entry(src_path, tgt_path, d_type);
+	/* For DT_DIR: register a nested merge_entry and recurse. Do NOT add a
+	 * DT_DIR entry to hymo_paths — hymofs_resolve_target() matches it by
+	 * exact strcmp in getname_flags, which would wholesale-redirect every
+	 * lookup of this subdir (e.g. an open of /product/overlay/foo would
+	 * resolve against the module's incomplete foo, hiding all real
+	 * siblings). The nested merge_entry gives this subdir its own
+	 * iterate_dir-time injection instead, so the real subdir contents stay
+	 * visible.
+	 *
+	 * For non-directory children we still register an exact redirect in
+	 * hymo_paths so open() of that file routes to the module backing.
+	 */
+	if (d_type == DT_DIR) {
+		if (mc->depth < 8) {
+			hymofs_register_nested_merge(src_path, tgt_path);
+			hymofs_materialize_merge(src_path, tgt_path,
+						 mc->depth + 1);
+		}
+	} else {
+		hymofs_add_path_entry(src_path, tgt_path, d_type);
+	}
 
 	inj_dir = kstrdup(mc->src_prefix, GFP_KERNEL);
 	if (inj_dir)
 		hymofs_add_inject_rule(inj_dir);
 	hymofs_mark_dir_has_inject(mc->src_prefix);
-
-	if (d_type == DT_DIR && mc->depth < 8)
-		hymofs_materialize_merge(src_path, tgt_path, mc->depth + 1);
 
 	kfree(src_path);
 	kfree(tgt_path);
