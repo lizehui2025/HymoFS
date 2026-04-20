@@ -81,5 +81,5 @@ jobs:
       - name: Upload .ko
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.kmi }}_hymofs_lkm.ko
-          path: ${{ env.OUT }}/${{ inputs.kmi }}_hymofs_lkm.ko
+          name: ${{ inputs.kmi }}_${{env.TARGET_ARCH }}_hymofs_lkm.ko
+          path: ${{ env.OUT }}/${{ inputs.kmi }}_${{ env.TARGET_ARCH }}_hymofs_lkm.ko
