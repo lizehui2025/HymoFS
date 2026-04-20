@@ -1,18 +1,17 @@
-// SPDX-License-Identifier: Apache-2.0 OR GPL-2.0
+/* SPDX-License-Identifier: Apache-2.0 OR GPL-2.0 */
 /*
  * HymoFS LKM - Loadable Kernel Module for filesystem path manipulation.
- *
- * License: Author's work under Apache-2.0; when used as a kernel module
- * (or linked with the Linux kernel), GPL-2.0 applies for kernel compatibility.
  *
  * All hooks use kprobes or ftrace (fallback to kprobe).
  * GET_FD: kprobe+kretprobe on ni_syscall. VFS: try ftrace (entry) + kretprobe
  *   (exit) for vfs_getattr, d_path, iterate_dir, vfs_getxattr; else kprobe.
  * Works on CONFIG_STRICT_KERNEL_RWX kernels. Syscall nr passed at insmod (hymo_syscall_nr=).
  *
+ * License: Author's work under Apache-2.0; when used as a kernel module
+ * (or linked with the Linux kernel), GPL-2.0 applies for kernel compatibility.
+ *
  * Author: Anatdx
  */
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/kallsyms.h>

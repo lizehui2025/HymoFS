@@ -2,16 +2,15 @@
 /*
  * HymoFS LKM - ftrace-based VFS entry hooks.
  *
- * License: Author's work under Apache-2.0; when used as a kernel module
- * (or linked with the Linux kernel), GPL-2.0 applies for kernel compatibility.
- *
  * Uses ftrace for entry + kretprobe for exit on vfs_getattr, d_path,
  * iterate_dir, vfs_getxattr. Resolve: 1) __symbol_get, 2) hymofs_lookup_name,
  * 3) fallback to kprobes.
  *
+ * License: Author's work under Apache-2.0; when used as a kernel module
+ * (or linked with the Linux kernel), GPL-2.0 applies for kernel compatibility.
+ *
  * Author: Anatdx
  */
-
 #ifdef CONFIG_DYNAMIC_FTRACE
 
 #include <linux/module.h>

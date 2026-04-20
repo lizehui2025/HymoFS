@@ -1,4 +1,13 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: Apache-2.0 OR GPL-2.0 */
+/*
+ * HymoFS LKM - tracepoint-based syscall monitoring.
+ * Strategy: use sys_enter and sys_exit tracepoints to monitor relevant syscalls
+ *
+ * License: Author's work under Apache-2.0; when used as a kernel module
+ * (or linked with the Linux kernel), GPL-2.0 applies for kernel compatibility.
+ *
+ * Author: Anatdx
+ */
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
 #include <linux/tracepoint.h>

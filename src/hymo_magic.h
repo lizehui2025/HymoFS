@@ -2,8 +2,10 @@
 /*
  * HymoFS - userspace/kernel shared definitions (ioctl, protocol, constants).
  *
- * License: Author's work under Apache-2.0; when used with the kernel or LKM,
- * GPL-2.0 applies for kernel compatibility.
+ * License: Author's work under Apache-2.0; when used as a kernel module
+ * (or linked with the Linux kernel), GPL-2.0 applies for kernel compatibility.
+ *
+ * Author: Anatdx
  */
 #ifndef _LINUX_HYMO_MAGIC_H
 #define _LINUX_HYMO_MAGIC_H
