@@ -3,12 +3,12 @@ name: Build HymoFS Kernel Module
 on:
   workflow_call:
     inputs:
-      kmi:
-        description: "KMI version"
-        required: true
-        type: string
       arch:
         description: "Target architecture (DDK currently supports arm64 only)"
+        required: true
+        type: string
+      kmi:
+        description: "KMI version"
         required: true
         type: string
       hymofs_ref:
@@ -30,8 +30,8 @@ jobs:
       image: ghcr.io/ylarod/ddk:${{ inputs.kmi }}-${{ inputs.ddk_release }}
       options: --privileged
     env:
-      KMI: ${{ inputs.kmi }}
       TARGET_ARCH: ${{ inputs.arch }}
+      KMI: ${{ inputs.kmi }}
       OUT: ${{ github.workspace }}/out
 
     steps:
@@ -39,6 +39,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Fix git safe.directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Validate target arch
         run: |
