@@ -21,6 +21,8 @@ jobs:
           - android14-6.1
           - android15-6.6
           - android16-6.12
+        arch:
+          - arm64
     uses: ./.github/workflows/ddk-lkm.yml
     secrets: inherit
     with:
@@ -148,7 +150,6 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      # 使用 workflow_dispatch API 显式触发 build.yml（比 repository_dispatch 更可靠，可指定 ref）
       - name: Trigger hymo workflow_dispatch
         env:
           HYMO_REPO: Anatdx/hymo
