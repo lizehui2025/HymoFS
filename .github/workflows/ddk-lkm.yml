@@ -74,7 +74,7 @@ jobs:
 
           mkdir -p "$OUT"
           KO_FILE="${KMI}_${TARGET_ARCH}_hymofs_lkm.ko"
-          cp "./hymofs_lkm.ko" "$OUT/$KO_FILE"
+          cp "src/hymofs_lkm.ko" "$OUT/$KO_FILE"
           llvm-strip -d "$OUT/$KO_FILE" 2>/dev/null || true
           ls -la "$OUT/"
 
