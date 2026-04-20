@@ -1,42 +1,44 @@
 # HymoFS
 
-HymoFS 是一个面向 Android GKI / Linux 内核的路径控制 LKM（`hymofs_lkm.ko`），用于 root/SU 场景下的重定向、隐藏、合并和伪装能力。
+HymoFS is an out-of-tree Linux kernel module (`hymofs_lkm.ko`) for Android GKI/Linux path control in root/SU environments.
 
-当前仓库是 **LKM 形态**，不是“给内核源码打补丁”的 in-tree 版本。
+It provides redirection, hiding, merge/injection, and spoofing behavior through an anonymous-fd + `ioctl` control plane.
 
-## 当前状态
+中文版本: [README.zh-CN.md](./README.zh-CN.md)
 
-- 代码主体在 `src/`，模块名为 `hymofs_lkm.ko`
-- 控制面为“匿名 fd + ioctl”，协议定义在 `src/hymo_magic.h`
-- 已接入 DDK / CI，按多 KMI 自动构建
-- 默认启用 ftrace 尝试，失败自动回退 kprobe
-- 针对 6.6+ 的 `arch_ftrace_get_regs` 差异已做兼容处理
+## Scope and Status
 
-## 主要能力
+- Repository type: LKM (not an in-tree kernel patch set)
+- Main code: `src/`
+- Control protocol: `src/hymo_magic.h`
+- Current protocol version: `HYMO_PROTOCOL_VERSION = 14` (api15 is still in development)
+- Hook strategy: ftrace/tracepoint first when available, with kprobe/kretprobe fallback
+- 6.6+ compatibility for `arch_ftrace_get_regs` is included in current code
 
-- 路径重定向：`src -> target`
-- 路径反查：`d_path` 场景下反向映射
-- 目录隐藏：过滤 `iterate_dir` 返回项
-- 目录合并/注入：用于 overlay 类场景
-- `kstat` 伪装：inode/dev/size/time 等
-- `xattr` 过滤/伪装（含 SELinux context 相关路径）
-- `uname` 伪装
-- `/proc/cmdline` 伪装
-- `/proc/*/maps` 规则伪装（ino/dev/pathname）
-- mount hide / statfs spoof 等可选特性
+## Core Capabilities
 
-> 注意：这些能力会拦截 VFS 与系统调用热点路径，请仅在可控环境使用。
+- Path redirect: `src -> target`
+- Reverse mapping for path presentation (`d_path` related flow)
+- Directory entry hiding (`iterate_dir` filtering)
+- Directory merge/injection behavior
+- `kstat` spoofing (ino/dev/size/time, etc.)
+- Overlay/xattr related filtering
+- `uname` spoofing
+- `/proc/cmdline` spoofing
+- `/proc/<pid>/maps` spoofing rules (ino/dev/pathname)
+- Mount-hide and statfs spoof features
 
-## Hook 架构概览
+Use in controlled environments only. This module hooks VFS and syscall hot paths.
 
-- GET_FD 路径：tracepoint 优先，回退到 kprobe/kretprobe
-- VFS 路径：ftrace（entry）+ kretprobe（ret）优先，失败回退 kprobe
-- 符号解析：优先通过 `kallsyms_lookup_name`，否则按符号逐个 kprobe 解析
-- 高版本兼容：6.6+ 对 `arch_ftrace_get_regs` 的头文件差异已处理
+## Hook Overview
 
-## 兼容内核（CI 覆盖）
+- GET_FD path: `tracepoint` preferred, fallback to `kprobe/kretprobe`
+- VFS path: `ftrace` (entry) + `kretprobe` (ret) preferred, fallback to `kprobe`
+- Symbol resolution: prefer `kallsyms_lookup_name`, fallback to per-symbol kprobe resolution
 
-当前 workflow 会构建以下 KMI 目标：
+## CI KMI Targets
+
+Current workflow builds:
 
 - `android12-5.10`
 - `android13-5.10`
@@ -46,162 +48,83 @@ HymoFS 是一个面向 Android GKI / Linux 内核的路径控制 LKM（`hymofs_l
 - `android15-6.6`
 - `android16-6.12`
 
-对应文件见 `.github/workflows/build-lkm.yml` 和 `.github/workflows/ddk-lkm.yml`。
+See `.github/workflows/build-lkm.yml` and `.github/workflows/ddk-lkm.yml`.
 
-## 构建
+## Build
 
-### 1) 使用 ddk（推荐）
-
-仓库根目录已有 `.ddk-version`，可直接：
+### Option A: DDK (recommended)
 
 ```bash
 ddk build
-```
-
-或指定目标：
-
-```bash
 ddk build android14-6.1
 ddk build android15-6.6
 ```
 
-### 2) 使用内核源码树本地编译
+### Option B: Kernel tree local build
 
-先准备目标内核的 `modules_prepare`，再编译模块：
+Run against a prepared kernel tree (`modules_prepare` done):
 
 ```bash
 make -C /path/to/kernel ARCH=arm64 M=$(pwd)/src modules
 ```
 
-仓库根目录 `Makefile` 会把 `M` 指向 `src/`；也可以直接进 `src/` 使用其 Makefile。
+## Load and Debug Parameters
 
-## 加载与基础参数
-
-加载示例：
-
-```bash
+```sh
 insmod hymofs_lkm.ko
 ```
 
-常用模块参数（调试用）：
+If symbol export limitations prevent loading, and you are using newer KernelSU or its forks, you can also try:
 
-- `hymo_syscall_nr`：GET_FD 的 syscall 编号参数（默认 142 路径兼容）
-- `hymo_no_tracepoint=1`：强制跳过 tracepoint，使用 kprobe
-- `hymo_skip_vfs=1`：跳过 VFS hooks（排障）
-- `hymo_skip_extra_kprobes=1`：跳过额外 kprobes（排障）
-- `hymo_skip_getfd=1`：跳过 GET_FD hooks（排障）
-- `hymo_skip_kallsyms=1`：跳过 kallsyms 路径，强制逐符号 kprobe
-- `hymo_dummy_mode=1`：最小化加载流程（排障）
+```sh
+ksud insmod hymofs_lkm.ko
+```
 
-参数定义在 `src/hymofs_core.c`，实际可用项请以当前源码为准。
+Common module parameters in `src/hymofs_core.c`:
 
-## 用户态控制面（fd + ioctl）
+- `hymo_syscall_nr`
+- `hymo_no_tracepoint=1`
+- `hymo_skip_vfs=1`
+- `hymo_skip_extra_kprobes=1`
+- `hymo_skip_getfd=1`
+- `hymo_skip_kallsyms=1`
+- `hymo_dummy_mode=1`
 
-1. 用户态先通过 GET_FD 通路获取匿名 fd（仅 root 可获取）。
-2. 对该 fd 发送 `ioctl` 管理规则与开关。
+## Userspace Control Plane
 
-协议定义：
+1. Userspace obtains an anonymous fd through GET_FD (root-only).
+2. Userspace sends `ioctl` on that fd to manage rules/features.
 
-- `src/hymo_magic.h`
-- `HYMO_PROTOCOL_VERSION` 当前为 `14`
+Main ioctls (see `src/hymo_magic.h` for full ABI):
 
-常用 ioctl（示例）：
+- `HYMO_IOC_ADD_RULE`, `HYMO_IOC_DEL_RULE`, `HYMO_IOC_HIDE_RULE`
+- `HYMO_IOC_ADD_MERGE_RULE`, `HYMO_IOC_CLEAR_ALL`, `HYMO_IOC_SET_ENABLED`
+- `HYMO_IOC_GET_FEATURES`, `HYMO_IOC_GET_HOOKS`, `HYMO_IOC_LIST_RULES`
+- `HYMO_IOC_ADD_SPOOF_KSTAT`, `HYMO_IOC_UPDATE_SPOOF_KSTAT`
+- `HYMO_IOC_SET_UNAME`, `HYMO_IOC_SET_CMDLINE`
+- `HYMO_IOC_ADD_MAPS_RULE`, `HYMO_IOC_CLEAR_MAPS_RULES`
+- `HYMO_IOC_SET_MOUNT_HIDE`, `HYMO_IOC_SET_MAPS_SPOOF`, `HYMO_IOC_SET_STATFS_SPOOF`
 
-- `HYMO_IOC_ADD_RULE` / `HYMO_IOC_DEL_RULE`
-- `HYMO_IOC_HIDE_RULE`
-- `HYMO_IOC_ADD_MERGE_RULE`
-- `HYMO_IOC_CLEAR_ALL`
-- `HYMO_IOC_SET_ENABLED`
-- `HYMO_IOC_GET_FEATURES`
-- `HYMO_IOC_GET_HOOKS`
-- `HYMO_IOC_ADD_SPOOF_KSTAT`
-- `HYMO_IOC_SET_UNAME`
-- `HYMO_IOC_SET_CMDLINE`
-- `HYMO_IOC_ADD_MAPS_RULE`
-- `HYMO_IOC_SET_MOUNT_HIDE`
-- `HYMO_IOC_SET_STATFS_SPOOF`
+For userspace integration, you can reuse [hymo](https://github.com/Anatdx/hymo) (C++) to reduce ABI mismatch risk.  
+You can also use [YukiSU](https://github.com/Anatdx/YukiSU) (C++) for KernelSU-integrated flows.  
+In addition, the [hybrid-mount](https://github.com/Hybrid-Mount/meta-hybrid_mount) meta-module includes HymoFS support with a Rust userspace implementation.  
 
-> 建议直接复用 [hymo](https://github.com/Anatdx/hymo) 的用户态实现，避免结构体版本不一致。
+> Given mount logic quality and update cadence, hybrid-mount is generally the preferred meta-module choice.
 
-## 常见问题（Troubleshooting）
+## Quick Troubleshooting
 
-### 1) `arch_ftrace_get_regs` 重定义（6.1）
+- `Unknown symbol __tracepoint_sys_enter`: try `hymo_no_tracepoint=1`
+- Builds but cannot load: check `vermagic`, module signature policy, and `dmesg`
+- Hook/ABI changes: validate with `HYMO_IOC_GET_HOOKS` and `HYMO_IOC_GET_FEATURES`
 
-现象：
+## Repository Layout
 
-- `error: 'arch_ftrace_get_regs' macro redefined`
+- `src/`: LKM implementation
+- `docs/`: design and notes
+- `scripts/`: automation scripts
+- `.github/workflows/`: multi-KMI build/release pipeline
 
-原因：
-
-- 目标内核头文件已经定义该宏，模块又重复定义。
-
-状态：
-
-- 当前代码已按内核版本和头文件行为处理，6.1 不应再重复定义。
-
-### 2) `arch_ftrace_get_regs` 未声明（6.6）
-
-现象：
-
-- `call to undeclared function 'arch_ftrace_get_regs'`
-
-原因：
-
-- 6.6 某些头文件路径里只调用不定义该宏。
-
-状态：
-
-- 当前代码已在 6.6+ 进行兼容兜底。
-
-### 3) `Unknown symbol __tracepoint_sys_enter`
-
-现象：
-
-- 模块加载时报 `Unknown symbol __tracepoint_sys_enter (err -2)`。
-
-原因：
-
-- 目标内核未导出 tracepoint 相关符号。
-
-处理：
-
-- 使用 `hymo_no_tracepoint=1`，强制走 kprobe 路径。
-
-### 4) 模块能编译但无法加载
-
-优先检查：
-
-- `vermagic` 是否匹配目标内核
-- 是否开启了内核模块签名强校验
-- `dmesg` 里具体报错（符号缺失、权限、签名）
-
-## 仓库结构
-
-- `src/`：LKM 代码与头文件
-- `docs/`：设计与路线文档
-- `scripts/`：自动化脚本
-- `.github/workflows/`：多 KMI 构建与产物流程
-
-## 开发建议
-
-- 每次改 hook/ABI 后先跑最小加载验证（`insmod` + `dmesg`）
-- 用 `HYMO_IOC_GET_HOOKS` / `HYMO_IOC_GET_FEATURES` 做运行态自检
-- 多 KMI 变更要至少覆盖 `5.10 / 6.1 / 6.6` 三档验证
-- 先保证 fallback（kprobe）可用，再调优 tracepoint/ftrace 路径
-
-## 相关项目
-
-- 用户态控制器：[hymo](https://github.com/Anatdx/hymo)
-- 致谢与灵感来源：[susfs4ksu](https://gitlab.com/simonpunk/susfs4ksu)
-
-## 许可证
+## License
 
 - SPDX: `Apache-2.0 OR GPL-2.0`
-- 非内核链接场景：Apache-2.0
-- 以内核模块形式使用时：GPL-2.0 兼容约束适用
-
-详见：
-
-- `LICENSE`
-- `LICENSE-GPL-2.0`
-- `NOTICE`
+- See `LICENSE`, `LICENSE-GPL-2.0`, and `NOTICE`
