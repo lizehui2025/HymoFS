@@ -149,7 +149,7 @@ jobs:
   trigger-hymo:
     name: Trigger hymo build-lkm
     needs: merge-lkm
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref_name != 'dev'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger hymo workflow_dispatch
