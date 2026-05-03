@@ -10,7 +10,7 @@ API_ID = 611335
 API_HASH = "d524b414d21f4d37f08684c1df41ac9c"
 
 # Session file for local persistence (avoids ImportBotAuthorization flood wait)
-SESSION_FILE = Path(__file__).resolve().parent / ".hymobot_session"
+SESSION_FILE = Path(__file__).resolve().parent / ".kasumibot_session"
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
@@ -84,7 +84,7 @@ def check_environ():
 
 
 def load_session():
-    """Load session from SESSION_STRING env or .hymobot_session file."""
+    """Load session from SESSION_STRING env or .kasumibot_session file."""
     session_str = os.environ.get("SESSION_STRING")
     if session_str and session_str.strip():
         return StringSession(session_str.strip()), False
@@ -132,7 +132,7 @@ async def main():
             save_session(client)
     except errors.FloodWaitError as e:
         print(f"[-] Flood wait: must wait {e.seconds} seconds (ImportBotAuthorization)")
-        print("[-] Add TELEGRAM_SESSION_STRING to repo secrets (same as hymo repo).")
+        print("[-] Add TELEGRAM_SESSION_STRING to repo secrets (same as kasumi repo).")
         raise
     try:
         caption = [""] * len(files)
