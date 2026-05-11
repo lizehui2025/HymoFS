@@ -29,6 +29,7 @@
 #include "kasumi_iop_override.h"
 #include "kasumi_fop_override.h"
 #include "kasumi_fake_mountinfo.h"
+#include "kasumi_fake_selinuxfs_access.h"
 #include "kasumi_syscall_redirect.h"
 #include "kasumi_tracepoint_hooks.h"
 
@@ -244,6 +245,7 @@ int kasumi_bootstrap_init(void)
 	(void)kasumi_iop_override_init();
 	(void)kasumi_fop_override_init();
 	(void)kasumi_fake_mi_init();
+	(void)kasumi_fake_selinuxfs_access_init();
 	pr_alert("Kasumi: Chikyuu ga buttobu kurai tanoshinjaoo!!\n");
 	return 0;
 
@@ -294,6 +296,7 @@ void kasumi_bootstrap_exit(void)
 	kasumi_file_view_shutdown();
 	kasumi_proc_hooks_exit();
 	kasumi_vfs_hooks_exit(kasumi_skip_vfs_param);
+	kasumi_fake_selinuxfs_access_exit();
 	kasumi_fop_override_exit();
 	kasumi_iop_override_exit();
 	kasumi_xattr_sid_override_exit();

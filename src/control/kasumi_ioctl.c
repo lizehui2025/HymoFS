@@ -58,6 +58,7 @@
 #include "kasumi_iop_override.h"
 #include "kasumi_fop_override.h"
 #include "kasumi_fake_mountinfo.h"
+#include "kasumi_fake_selinuxfs_access.h"
 /* ======================================================================
  * Part 15: Dispatch Handler (ioctl only; all commands use KSM_IOC_* from kasumi_uapi.h)
  * GET_FD is syscall-only -> kasumi_get_anon_fd()
@@ -180,7 +181,7 @@ static int kasumi_dispatch_cmd(unsigned int cmd, void __user *arg)
 			written += scnprintf(kbuf + written, buf_size - written,
 					     "hide_xattr_sb %p\n", sb_entry->sb);
 		}
-		/* Feature rules: mount_hide, maps_spoof, statfs_spoof, stealth */
+		/* Feature rules: mount_hide, maps_spoof, statfs_spoof, fake_selinuxfs, stealth */
 		if (kasumi_feature_enabled_mask & KSM_FEATURE_MOUNT_HIDE) {
 			if (written < buf_size)
 				written += scnprintf(kbuf + written, buf_size - written,
@@ -195,6 +196,11 @@ static int kasumi_dispatch_cmd(unsigned int cmd, void __user *arg)
 			if (written < buf_size)
 				written += scnprintf(kbuf + written, buf_size - written,
 						     "statfs_spoof enabled\n");
+		}
+		if (kasumi_feature_enabled_mask & KSM_FEATURE_FAKE_SELINUXFS) {
+			if (written < buf_size)
+				written += scnprintf(kbuf + written, buf_size - written,
+						     "fake_selinuxfs enabled\n");
 		}
 		if (kasumi_stealth_enabled) {
 			if (written < buf_size)
@@ -581,6 +587,8 @@ static int kasumi_dispatch_cmd(unsigned int cmd, void __user *arg)
 		if (kasumi_statfs_kretprobe_registered ||
 		    kasumi_statfs_tracepoint_registered)
 			features |= KSM_FEATURE_STATFS_SPOOF;
+		if (kasumi_fake_selinuxfs_access_active())
+			features |= KSM_FEATURE_FAKE_SELINUXFS;
 		if (copy_to_user(arg, &features, sizeof(features)))
 			return -EFAULT;
 		return 0;
@@ -643,6 +651,9 @@ static int kasumi_dispatch_cmd(unsigned int cmd, void __user *arg)
 		else
 			n = scnprintf(kbuf + written, buf_size - written,
 				     "vfs: getattr=iop readdir=fop d_path=none getxattr=none\n");
+		written += n;
+		n = scnprintf(kbuf + written, buf_size - written, "selinuxfs/access,context: %s\n",
+			      kasumi_fake_selinuxfs_access_active() ? "shadow fop" : "none");
 		written += n;
 
 		/* uname */
